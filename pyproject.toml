@@ -1,0 +1,13 @@
+[project]
+name = "fashion-churn-platform"
+version = "0.1.0"
+description = "AI-powered customer churn prediction and retention platform for a fashion e-commerce brand, reading the source CSV files directly."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+# `pythonpath = ["."]` lets tests do `from src.data.csv_loader import ...` without the
+# package being installed and without any sys.path manipulation inside the test files.
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["error::DeprecationWarning:src.*"]

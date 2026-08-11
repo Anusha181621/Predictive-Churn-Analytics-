@@ -1,0 +1,30 @@
+# --- environments ---
+.venv/
+venv/
+env/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- local configuration (never commit real settings) ---
+.env
+
+# --- generated artefacts ------------------------------------------------------
+# The CSV files under data/ ARE tracked: they are the source of truth.
+# Everything the application produces is not.
+logs/
+outputs/*
+!outputs/.gitkeep
+models/*
+!models/.gitkeep
+
+# --- editors / OS ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.~lock.*#
