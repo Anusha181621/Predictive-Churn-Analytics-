@@ -5,12 +5,12 @@ It uses three years of customer, transaction, return and product history to answ
 questions: **who is likely to churn**, **why**, **how much revenue is at risk**, **what to do
 about it**, and **who to contact first**.
 
-> **Status: data layer + validation + feature store + churn model + SHAP explainability complete.**
-> This repository contains the verified data layer, a reusable per-file validation layer, the
-> customer feature store (148 features as of a prediction date), the churn model with time-based
-> validation and calibrated probabilities, and per-customer SHAP explanations in plain English.
-> 312 tests pass. The retention engine and the dashboard are **not implemented yet**.
-> See [Next implementation step](#next-implementation-step).
+> **Status: everything except the dashboard.**
+> Data layer, per-file validation, the customer feature store (148 features as of a prediction
+> date), the churn model with time-based validation and calibrated probabilities, per-customer SHAP
+> explanations in plain English, and the retention decision layer — revenue at risk, twelve
+> segments, prioritisation and personalised recommendations. 358 tests pass. The Streamlit
+> dashboard is **not implemented yet**. See [Next implementation step](#next-implementation-step).
 
 ---
 
@@ -69,7 +69,10 @@ python scripts/predict.py
 # 8. explain why each customer is at risk
 python scripts/explain.py
 
-# 9. run the tests
+# 9. build the retention decision layer
+python scripts/retention.py
+
+# 10. run the tests
 pytest
 ```
 
@@ -527,7 +530,13 @@ src/
 │   ├── customer_explanations.py  per-customer top-k drivers
 │   └── pipeline.py       CSVs -> features -> model -> SHAP -> sentences
 ├── segmentation/         value / risk / behaviour       (not implemented yet)
-├── retention/            revenue at risk, ROI, actions  (not implemented yet)
+├── retention/
+│   ├── params.py         assumptions, kept separate from policy inputs
+│   ├── value.py          expected future revenue (frequency x value)
+│   ├── segments.py       the twelve business segments
+│   ├── scoring.py        revenue at risk, propensity, opportunity score
+│   ├── recommendations.py  action/channel/category/SKU/offer/reason
+│   └── pipeline.py       both output CSVs + the assumption manifest
 └── utils/
     ├── paths.py          the ONLY place path logic lives
     └── logging_config.py idempotent logging setup
@@ -543,7 +552,8 @@ scripts/
 ├── build_features.py     build outputs/customer_features.csv
 ├── train_model.py        train, select, calibrate, save the model
 ├── predict.py            score customers -> predictions CSV
-└── explain.py            SHAP -> explanations CSV + global artefacts
+├── explain.py            SHAP -> explanations CSV + global artefacts
+└── retention.py          segments, scores, recommendations
 PROMPTS.md                the build prompts, Sections 0-7, with delivery status
 tests/
 ├── test_config.py        configuration and portable path resolution
@@ -553,7 +563,8 @@ tests/
 ├── test_features.py      feature arithmetic + the leakage proofs
 ├── test_labels.py        label semantics, censoring, leakage
 ├── test_models.py        split embargoes, risk bands, persistence
-└── test_explainability.py  SHAP folding, sentence correctness, grouping
+├── test_explainability.py  SHAP folding, sentence correctness, grouping
+└── test_retention.py     projection caps, ROI guardrails, recommendations
 ```
 
 ---
@@ -600,7 +611,7 @@ you want to point `DATA_DIR` at a shared location.
 ## Testing
 
 ```bash
-pytest                            # whole suite: 312 tests
+pytest                            # whole suite: 358 tests
 pytest tests/test_validation.py   # the validation logic only
 pytest tests/test_features.py     # feature arithmetic and the leakage proofs
 pytest tests/test_labels.py       # label semantics and censoring
@@ -729,20 +740,135 @@ alongside the feature-count reduction noted below.
 
 ---
 
+## Retention decision layer
+
+```bash
+python scripts/retention.py                    # -> scores + recommendations + assumption manifest
+python scripts/retention.py --customer CUST0234 # one customer's full retention record
+python scripts/retention.py --propensity 0.15   # test a different assumption
+python scripts/retention.py --min-roi 0.5       # demand a 50% margin before contacting
+```
+
+### Retention propensity is an assumption, and stays labelled as one
+
+Propensity is *the probability that contacting a customer changes their behaviour*. Measuring it
+needs a campaign log and an untreated control group. **This dataset has neither**, so it cannot be
+learned here — there is nothing in four CSVs of transactions that identifies a causal effect.
+
+So it is stated openly and propagated visibly:
+
+- the base rate is one configurable number (25%), not a fitted-looking artefact;
+- the behavioural multipliers are *directional* judgements with a stated rationale, deliberately
+  coarse (×0.6, ×1.4) so nobody mistakes them for measurements;
+- `outputs/retention_assumptions.json` ships alongside the CSVs, and the columns are literally named
+  `Retention propensity (ASSUMED)` and `Propensity basis (ASSUMED)`;
+- `Propensity basis` names every multiplier that fired for that customer — *"base 25% (assumption);
+  discount-responsive ×1.4; still active ×1.2"* — so the number can be taken apart, not trusted.
+
+**`revenue_at_risk` is deliberately kept free of the assumption.** It depends only on the model's
+probability and the observed-revenue projection, so a business that rejects the propensity figures
+can still use the exposure number. Everything downstream of propensity is flagged. `params.py`
+separates `assumptions()` from `policy_inputs()` structurally — a reader must be able to see which
+numbers came from the business and which were invented in the absence of data.
+
+### Expected future revenue
+
+All five inputs the brief names, combined as **frequency × value** rather than one ratio:
+
+```
+expected orders  = 0.6 × orders in last 365d  +  0.4 × lifetime order rate
+expected value   = 0.6 × recent AOV           +  0.4 × lifetime AOV
+expected revenue = expected orders × expected value, pro-rated to the horizon
+```
+
+Recent behaviour leads because the next order resembles the last few, but does not dominate, so one
+quiet quarter cannot erase three years. **Tenure governs how far the projection may reach** — the
+lesson from Section 3, where annualising a customer with one €780 order and 24 days of history made
+them the most valuable account in the book. Two guards: the rate denominator is floored at 180 days,
+and every projection is capped at 2× observed lifetime revenue. Historical annual revenue is carried
+as a **cross-check** with the ratio between the two, so a reviewer can see when the models disagree.
+
+At 2025-12-31: **€585,966** expected future revenue over 180 days, **€125,129** at risk.
+
+### The twelve segments, multi-label by design
+
+| Segment | Primary for | Also flagged for |
+|---|---|---|
+| Discount-Driven At Risk | 241 | 274 |
+| Frequent but Declining | 160 | 176 |
+| Dormant Customers | 143 | 378 |
+| Loyal Customers | 115 | 226 |
+| High-Return Customers | 108 | 195 |
+| Champions | 87 | 127 |
+| One-Time Buyers | 41 | 199 |
+| New Customers | 33 | 78 |
+| High-Value At Risk | 17 | 17 |
+| Lost Customers | 16 | 16 |
+| Seasonal Customers | 5 | 73 |
+| Low-Value At Risk | 3 | 21 |
+
+The gap between the columns *is* the point — the brief asks that customers carry several analytical
+dimensions rather than one rigid label. A High-Return Customer who is also High-Value At Risk needs
+both facts: one says act now, the other says be careful what you offer.
+
+**Discount-Driven At Risk uses a cohort percentile, not an absolute score.** The first version used
+absolute flags and labelled **526 of 1,000** customers — with 50.6% of this dataset's order lines
+discounted, that is not a segment, it is a description of the brand. Ranking within the cohort keeps
+it discriminating whatever the brand's promotional intensity.
+
+### Recommendations, driven by behaviour
+
+Nine distinct actions in use, **77 distinct SKUs**, 15 distinct offers, **413 distinct reasons**
+across 1,000 customers. Every field is derived:
+
+- **Offer** — the discount depth *they* have responded to, capped by policy: 10/15/20/25% actually
+  in use. A house-standard "15% off" for everybody would be the hardcoding the brief forbids.
+- **SKU** — the best-selling product in the recommended category, filtered to their target gender
+  and price band, **excluding everything they already own**.
+- **Category** — their preferred one, or for cross-sell the category their peers most often pair
+  with it, measured from the transactions rather than asserted from fashion intuition.
+- **Channel** — inferred from the channel that acquired them, with age as a tiebreak.
+- **Reason** — composed at runtime, citing their numbers.
+
+**The brief's two guardrails are structural, not hoped for.** A full-price buyer can never reach a
+discount rule because `Organic Engagement` is checked first and claims them. And a negative expected
+ROI overrides the chosen action — *after* the fact, so the reason says what was proposed and why it
+was dropped.
+
+Cheap levers come before expensive ones: a predictable buyer barely into their interval gets a free
+reminder, not margin.
+
+### Campaign economics
+
+779 targeted, 221 suppressed. Cost **€6,935**, expected return **€37,265**, blended ROI **+437%**.
+
+The suppression list is broken down by *reason*, because "already engaged" and "unrecoverable" call
+for completely different follow-up: 144 already highly engaged, 38 uneconomic, 23 seasonal and out of
+season, 16 unrecoverable.
+
+**A modelling error worth naming.** I first costed discount incentives against the customer's *whole*
+projected spend. That made 315 of 1,000 discounts look uneconomic and suppressed **six of the top ten
+opportunities**, because cost scaled with `EFR × depth` while the benefit was only
+`EFR × churn × propensity` — roughly three times smaller. A win-back coupon is redeemed on the order
+the intervention produces, so its expected cost is `depth × expected retained revenue`. Known
+simplification, stated rather than guessed at: this understates cost by whatever the discount
+cannibalises from customers who would have bought anyway, which needs a control group to measure.
+
+---
+
 ## Next implementation step
 
-**Revenue at risk, segmentation and the retention recommendation engine (Section 5).**
+**The Streamlit dashboard (Section 6).**
 
-1. Replace the interim revenue-at-risk estimate with a fuller expected-future-revenue model using
-   order frequency, average order value, recent behaviour and tenure.
-2. Build the 12 business segments (Champions, High-Value At Risk, Discount-Driven At Risk, …),
-   allowing a customer to carry several analytical dimensions rather than one rigid label.
-3. Retention opportunity score = churn probability × expected future revenue × retention propensity,
-   with the propensity assumption configurable and **clearly labelled as an assumption**.
-4. Personalised recommendations driven by the features already present: `is_full_price_buyer` for
-   who *not* to discount, `preferred_category` and `days_since_preferred_category_purchase` for what
-   to recommend, `seasonally_explained_inactivity` for who to leave alone.
-5. Write `outputs/customer_retention_scores.csv` and `outputs/retention_recommendations.csv`.
+1. `streamlit run app/dashboard.py`, reading `data/*.csv` and `outputs/*.csv` — no database.
+2. Eight pages: Executive Overview, Churn Risk, Revenue at Risk, Retention Action Center,
+   Customer 360, Customer Segmentation, What-If Simulator, Model Performance.
+3. Every number sourced from the artefacts already produced; no placeholder metrics.
+4. The SHAP artefacts were emitted as **data rather than images** precisely so this step can render
+   them interactively in Plotly and filter them.
+5. The What-If Simulator has an obvious first job: sweep the propensity assumption and the discount
+   depth, since both are already parameterised and the ROI response to them is the main thing a CRM
+   manager should be allowed to stress-test.
 
 ### Worth revisiting later
 
