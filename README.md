@@ -5,11 +5,12 @@ It uses three years of customer, transaction, return and product history to answ
 questions: **who is likely to churn**, **why**, **how much revenue is at risk**, **what to do
 about it**, and **who to contact first**.
 
-> **Status: Task 1 complete — data foundation.**
-> This repository currently contains the verified data layer: the CSV loader, configuration,
-> logging, data-quality validation, an inspection script and tests. The churn model, the
-> explainability layer, segmentation, the retention engine and the dashboard are **not
-> implemented yet**. See [Next implementation step](#next-implementation-step).
+> **Status: data layer + validation + feature store + churn model complete.**
+> This repository contains the verified data layer, a reusable per-file validation layer, the
+> customer feature store (148 features, one row per Customer ID, as of a prediction date), and the
+> churn prediction model with time-based validation and calibrated probabilities. 267 tests pass.
+> The explainability layer, the retention engine and the dashboard are **not implemented yet**.
+> See [Next implementation step](#next-implementation-step).
 
 ---
 
@@ -52,16 +53,26 @@ pip install -r requirements.txt
 # 3. (optional) configure — every setting already has a working default
 copy .env.example .env          # Windows;  cp .env.example .env elsewhere
 
-# 4. profile the data and run all quality checks
+# 4. validate the CSV files
+python scripts/validate_data.py
+
+# 5. profile the data (schema, dtypes, distributions) as well
 python scripts/inspect_data.py
 
-# 5. run the tests
+# 6. build the customer feature table
+python scripts/build_features.py
+
+# 7. train the churn model and score every customer
+python scripts/train_model.py
+python scripts/predict.py
+
+# 8. run the tests
 pytest
 ```
 
-`scripts/inspect_data.py` prints a full profile, writes
-[`outputs/data_profile.md`](outputs/) and `outputs/data_quality_report.json`, and exits non-zero
-if any error-severity check fails.
+Both scripts exit non-zero if any error-severity check fails, so either works as a pipeline or
+CI gate. `validate_data.py` writes `outputs/data_quality_report.json`; `inspect_data.py` writes
+that plus [`outputs/data_profile.md`](outputs/).
 
 ### Loading the data in your own code
 
@@ -79,6 +90,334 @@ data.transactions["order_id"].iloc[0]   # '000001'  <- still zero-padded
 
 Columns are renamed to canonical `snake_case` on load (`Net Order Value` → `net_order_value`).
 Pass `normalize_columns=False` to keep the original CSV headers for display.
+
+---
+
+## Validation layer
+
+[`src/data/validation.py`](src/data/validation.py) is read-only by contract: a validator reads
+DataFrames and *reports*. It never coerces a value, drops a row, repairs a field or writes to
+`data/`. A failure means the data changed in a way the platform must know about — not that the
+data should be quietly fixed.
+
+One validator per source file, each usable on its own:
+
+```python
+from src.data.csv_loader import load_all
+from src.data.validation import validate_customers, validate_datasets, compute_return_rate
+
+data = load_all()
+
+# one file at a time — cross-table checks are simply skipped when the other table is absent
+report = validate_customers(data.customers)
+report.ok                      # False if any error-severity check failed
+report.metrics["unique_customers"]
+report.check("Customer ID is unique").passed
+
+# or everything at once
+full = validate_datasets(data)
+full.ok                        # True on the shipped data (101/101 checks)
+full.save("outputs/data_quality_report.json")
+
+compute_return_rate(data.transactions, data.returns)["unit_return_rate"]   # 0.199993
+```
+
+### What each validator checks
+
+| Validator | Checks |
+|---|---|
+| `validate_customers` | key present / unique / non-null / non-blank; age numeric and in range; gender, country and channel domains; registration date parses, is not implausibly early, and does not fall after the last purchase |
+| `validate_products` | key present / unique / non-null; price numeric and `>= 0`; category and subcategory populated; category, brand and gender domains |
+| `validate_transactions` | keys present and non-blank; `Order ID` still a zero-padded string; purchase date valid; `quantity > 0`; `selling price >= 0`; `0 <= discount <= 100`; net order value matches its formula; coupon implies a discount; **FK** `Customer ID → Customer.csv` and `SKU ID → Product.csv` |
+| `validate_returns` | keys present and non-blank; return date valid; `return quantity > 0`; one return per order line; every return corresponds to a real order line; return quantity never exceeds the purchased quantity; return date after purchase date; return attributed to the order's own customer |
+| `validate_relationships` | order grain (one customer / date / payment method per order, unique SKU per order); registration equals first purchase; no purchase before registration; each city in one country; plus the intentional properties recorded as `info` |
+
+Every validator also returns summary **metrics** — totals, unique keys, duplicates, missing
+values per column, and date ranges — so a dashboard can render the numbers without re-deriving
+them.
+
+### Severities
+
+| Severity | Meaning | Effect |
+|---|---|---|
+| `error` | A structural, referential or arithmetic invariant the platform relies on | fails the run |
+| `warning` | A departure from the *documented* shape (unseen category, different row count, age outside 18–65, price of zero). Legitimate if the data was refreshed | reported, does not fail |
+| `info` | A known, intentional property that is easy to misread as a bug | reported only |
+
+### Measured return rate
+
+The rate is computed, never assumed. On the shipped data:
+
+| Definition | Value |
+|---|---|
+| **Unit** rate — `returned quantity / purchased quantity` (primary) | 5,786 / 28,931 = **19.9993%** |
+| Line rate — returned lines / order lines | 5,048 / 20,000 = 25.24% |
+| Order rate — orders with any return / orders | 3,233 / 6,726 = 48.07% |
+
+All three are reported because they are different numbers and are easy to mistake for one
+another. The brief's "approximately 20%" refers to the **unit** rate only.
+
+### Report output
+
+`outputs/data_quality_report.json` is written for the dashboard to display later. Timestamps are
+ISO strings and all numpy scalars are converted, so the file is portable JSON:
+
+```json
+{
+  "generated_at": "...", "ok": true,
+  "summary":  {"total": 101, "passed": 101, "errors": 0, "warnings": 0},
+  "dataset":  {"unit_return_rate": 0.199993, "purchased_units": 28931, "...": "..."},
+  "tables": {
+    "customers": {
+      "ok": true,
+      "metrics": {"total_customers": 1000, "unique_customers": 1000, "duplicate_customers": 0,
+                  "missing_values": {}, "registration_date_min": "2023-01-02T00:00:00"},
+      "checks":  [{"table": "customers", "check": "Customer ID is unique",
+                   "passed": true, "severity": "error", "status": "PASS", "detail": "..."}]
+    }
+  }
+}
+```
+
+The CLI can also validate a single file, and `--strict` promotes warnings to a non-zero exit:
+
+```bash
+python scripts/validate_data.py --table customers --table returns
+python scripts/validate_data.py --strict --quiet
+```
+
+---
+
+## Customer feature store
+
+[`src/features/`](src/features/) turns the four CSVs into `customer_features`: **exactly one row
+per Customer ID, 148 features**, computed strictly as of a prediction date.
+
+```python
+from src.features import build_customer_features
+
+result = build_customer_features(as_of_date="2025-12-31")
+result.features        # 1,000 rows x 149 columns (customer_id + 148 features)
+result.feature_count   # 148
+result.issues          # calculation caveats, reported rather than hidden
+```
+
+```bash
+python scripts/build_features.py                     # -> outputs/customer_features.csv
+python scripts/build_features.py --as-of 2024-06-30  # a historical as-of date
+python scripts/build_features.py --list-features     # just the names
+```
+
+### The as-of date is the leakage guard
+
+[`src/features/context.py`](src/features/context.py) is the **single choke point**: it clips the
+data once, and every feature module reads only from the resulting `FeatureContext`. No module
+receives the raw frames, so none can reach past the prediction date.
+
+Two clipping rules, and the second is the one that is easy to get wrong:
+
+| Rule | Why |
+|---|---|
+| `purchase_date <= as_of` | A transaction that has not happened cannot inform today's prediction. |
+| `return_date <= as_of` | **The subtle half.** A return is a separate, later event from its purchase. Filtering only on purchase date would let a return that has not happened yet count against an order that has. On this dataset 104 returns are dated *after* the last purchase, the latest a month later. |
+
+The consequence is deliberate: return features **understate** the eventual return rate, because
+at any as-of date some returns are still in flight. At 2025-12-31 the features see 5,666 returned
+units, not the 5,786 that eventually settle. A model trained on settled return rates would be
+reading the future.
+
+**This is proved, not asserted.** [`test_features.py`](tests/test_features.py) builds features at
+date T from the full dataset and again from a dataset physically truncated at T, then asserts the
+two are byte-identical — on the synthetic fixture *and* on the real 20,000-row data. If anything
+leaked, those builds would differ.
+
+### One row per Customer ID, always
+
+Customers with no orders at the as-of date are **kept and flagged**, never dropped:
+`has_purchase_history` and `registered_at_as_of` distinguish them. Dropping them would hide a
+real cohort and make row counts incomparable between as-of dates. Verified across five dates:
+
+| as-of | rows | with history | orders | net revenue | returned units |
+|---|---|---|---|---|---|
+| 2023-12-31 | 1,000 | 306 | 1,092 | 344,780 | 821 |
+| 2024-06-30 | 1,000 | 457 | 2,070 | 632,305 | 1,643 |
+| 2024-12-31 | 1,000 | 665 | 3,538 | 1,119,718 | 2,861 |
+| 2025-06-30 | 1,000 | 842 | 4,989 | 1,567,312 | 4,128 |
+| 2025-12-31 | 1,000 | 1,000 | 6,726 | 2,132,427 | 5,666 |
+
+That stability is what lets Section 3 stack several historical as-of dates into a time-based
+split.
+
+### Feature groups (148 total)
+
+| Group | n | Contents |
+|---|---|---|
+| identity | 9 | age, gender, city, country, channel, age band, cohort flags |
+| rfm | 24 | recency, orders/units/revenue, AOV, and 30/90/180/365-day windows |
+| gaps | 13 | mean/median/max gap, current gap, **`purchase_gap_ratio`**, regularity |
+| trends | 16 | revenue/frequency/quantity/AOV growth, `spend_decline_pct`, recent-vs-historical |
+| lifecycle | 17 | tenure, first/last purchase, active & inactive months, early-vs-recent |
+| affinity | 16 | preferred category/subcategory/brand, breadth, diversity, `days_since_preferred_category_purchase` |
+| discount | 12 | average/max discount, coupon rate, full-price rate, `discount_dependency_score` |
+| returns | 11 | returned units/orders, `return_rate`, `recent_return_rate`, trend |
+| seasonality | 12 | preferred month/quarter, concentration, **`seasonal_customer_score`**, in-season status |
+| value | 8 | `annualized_revenue`, `customer_value_segment`, value percentile |
+| segments | 8 | six behavioural flags, `behavioral_segment`, `lifecycle_stage`, `segment_reason` |
+
+Windows are half-open — `(as_of - days, as_of]` — so `orders_30d` covers the 30 days *ending* at
+the as-of date and an order exactly 30 days back falls outside it.
+
+### Not classifying seasonal customers as churned
+
+A flat "no purchase in 180 days" rule punishes a twice-a-year buyer and lets a weekly buyer go
+three weeks unnoticed. Two features fix that:
+
+**`purchase_gap_ratio`** = current gap ÷ the customer's *own* median gap. Personalised, so a
+90-day silence is unremarkable for a quarterly buyer and alarming for a weekly one.
+
+**`seasonal_customer_score`** uses **circular statistics**, not a month histogram. December and
+January are adjacent in the year but maximally distant as bucket labels, so a customer who
+reliably shops the Christmas-and-January-sales window would score as *unseasonal* under a
+histogram — exactly backwards for a fashion retailer. Purchase dates are mapped to angles on a
+circle instead, and the resultant length measures clustering with December and January correctly
+adjacent. It is bias-corrected as `(n·R² − 1)/(n − 1)`, because raw `R` is 1.0 for a single
+purchase; scores are withheld entirely below 3 orders across 2+ calendar years, since with one or
+two orders any customer looks perfectly seasonal by accident.
+
+Together they produce `seasonally_explained_inactivity` — "this customer is quiet, and quiet is
+exactly what we should expect right now" — which `is_dormant_buyer` then respects. It has two
+deliberate limits, both of which matter:
+
+- A seasonal customer silent **during** their own season is genuinely worrying, so being in
+  season removes the shield.
+- A seasonal customer silent for **over a year** has already skipped a whole season, so
+  `missed_full_season` removes the shield too. Without this, a customer two years absent would be
+  excused indefinitely for being "out of season" — which is how a well-meant seasonality rule
+  becomes a blind spot. On the real data this correctly moves 20 of 73 seasonal buyers into
+  Dormant, while 53 mid-cycle ones keep their protection.
+
+### Calculation notes on the real data
+
+Reported by the builder rather than hidden, because each is a real limitation:
+
+| Note | Count |
+|---|---|
+| Exactly one order, so no gap is measurable — `expected_purchase_interval_days` falls back to 90 days and `has_measurable_cadence` is `False` | 277 |
+| No revenue in the previous 90-day window, so `*_growth` is **null rather than infinite** (tree models handle NaN natively; a fabricated number would invent a trend) | 634 |
+| Below the evidence bar for a seasonality score | 487 |
+| Tenure under 30 days, so `annualized_revenue` used a floored denominator and is an upper bound | 30 |
+
+`outputs/customer_features.csv` is an **analytical artefact**, not a source dataset — the CSVs
+under `data/` remain the source of truth. The in-memory table keeps full float precision for
+modelling; rounding is applied only when writing the CSV.
+
+---
+
+## Churn model
+
+```bash
+python scripts/train_model.py          # -> models/churn_model.joblib + outputs/model_metrics.json
+python scripts/predict.py              # -> outputs/customer_churn_predictions.csv
+```
+
+### The churn label is forward-looking
+
+The brief defines churn as "no purchase within 180 days after the last purchase". Read literally
+that is a *retrospective* rule applied to whoever looks quiet today — and it is the rule the brief
+elsewhere warns against, because it cannot tell a churned customer from a seasonal one.
+
+[`src/models/labels.py`](src/models/labels.py) turns it around: at a prediction date `as_of`, a
+customer is churned if they made **no purchase in `(as_of, as_of + 180]`**. Same meaning, but:
+
+- Features come from `<= as_of`, the label from `> as_of`. Leakage-free by construction.
+- **It cannot mislabel a seasonal customer**, because it never infers churn from inactivity — it
+  observes what the customer actually did next. The mislabelling problem is a property of
+  retrospective rules; a forward-looking label removes it rather than patching it.
+
+**Censoring.** A label needs its window to have finished. With data ending 2025-12-31 and a 180-day
+horizon, the last labelable date is **2025-07-04**; later dates are right-censored and get `NA`,
+never `0`. Treating an unfinished window as "did not churn" would teach the model that recent
+customers never leave — the most damaging error available here, and the easiest to make by accident.
+
+**Residual risk, measured not assumed.** A loyal annual buyer whose next purchase lands at day 200
+is still called churned by a uniform window. `--label-mode adaptive` scales the horizon to each
+customer's own cadence (`2 × expected interval`, floored at 90, capped at 365), and every run
+reports the disagreement. At 2024-12-31: 92.8% agreement, **20 customers rescued** by the adaptive
+horizon (the loyal-but-slow ones a uniform window mislabels) and 28 caught sooner.
+
+### Time-based validation: a three-stage split
+
+```
+selection : inner_train ──[embargo]──▶ inner_validation     pick the model family
+refit     : all fit dates                                   use the recent data too
+calibrate : held-out calibration date
+                          ──[embargo]──▶ test               report once
+```
+
+A row at `as_of = T` carries a label from `(T, T+180]`, so its *label* describes a period a later
+row uses for its *features*. An embargo — a horizon-wide gap — closes that. The question is which
+boundaries need one, and **"all of them" is the wrong answer**:
+
+| Boundary | Embargo | Why |
+|---|---|---|
+| Before **test** | Mandatory | Everything fitted (model *and* calibrator) must resolve before the test date. This is what makes the reported number trustworthy. |
+| Before **selection validation** | Mandatory, *inside* the training data | Buys nothing for the test estimate; it exists so model *selection* is unbiased. |
+
+Applying it at both *outer* boundaries — the obvious first design — was a mistake I measured and
+reverted. It consumed a year of the 24 usable months and confined training to the brand's growth
+phase (churn 18–33% against 47% in test). The resulting model was **worse than a single feature**:
+test ROC-AUC 0.68 versus 0.73 for `orders_365d` alone. Skipping the *inner* embargo instead is
+equally wrong in the other direction: LightGBM then scored 0.88 validation PR-AUC against 0.66 on
+test, and would have been picked over the linear model that generalised better.
+
+### Results
+
+Selected **LightGBM** (highest PR-AUC on the embargoed inner split), calibrated with isotonic
+regression chosen **out-of-fold** on the held-out 2024-12-31 period.
+
+| Test metric (2025-06-30, n=842, base rate 47.1%) | Value |
+|---|---|
+| ROC-AUC | 0.7056 |
+| PR-AUC | 0.6380 |
+| Precision / Recall / F1 | 0.640 / 0.442 / 0.442 |
+| Brier / ECE | 0.2105 / 0.0834 |
+| Calibration bias | +0.001 (mean predicted 0.472 vs observed 0.471) |
+| Lift @ top decile | 1.77× random |
+| **ROC-AUC among High Value customers** | **0.9135** |
+
+Two honest caveats, both reported by the training script rather than buried:
+
+1. **Ranking only matches the best single-feature heuristic** (`gap_vs_max_gap_ratio`, PR-AUC
+   0.652 vs the model's 0.638). Every run scores eight one-line heuristics as a sanity floor and
+   says so when the model fails to clear it. What the model adds is a *calibrated probability* —
+   a raw feature cannot give one, and revenue at risk needs it — plus far stronger discrimination
+   among high-value customers (ROC-AUC 0.91), which is where the money is.
+2. **The base rate drifts** 24.9% → 31.3% → 45.0% → 47.1% across selection/fit/calibration/test.
+   The brand was acquiring fast early on, so few customers had lapsed yet. Calibrating on a recent
+   held-out period is what keeps the predicted *level* usable despite the shift.
+
+Isotonic calibration collapses 1,000 customers onto 28 distinct probabilities. That is the price of
+the best out-of-fold Brier score, and it matters less than it looks: revenue at risk multiplies by
+customer value, which restores a fine-grained ranking. A near-tie on Brier is broken in favour of
+the smooth sigmoid for exactly this reason.
+
+### Predictions
+
+`outputs/customer_churn_predictions.csv` carries the columns the brief asks for — Customer ID,
+Prediction date, Churn probability, Risk level, Customer value, Lifetime revenue, Recent revenue,
+Recency, Frequency, Revenue at risk — plus diagnostics the later sections need.
+
+Risk bands are configurable (`RISK_THRESHOLD_*`), with the lower edge inclusive so `p = 0.60` is
+High: Low < 0.30 ≤ Medium < 0.60 ≤ High < 0.80 ≤ Critical.
+
+**Revenue at risk** = `churn probability × lifetime revenue × horizon / max(tenure, horizon)`. The
+`max(tenure, horizon)` denominator refuses to extrapolate past observed history. Annualising
+instead — the obvious approach — ranked a customer with one €780 order and 24 days of history as
+the most valuable account in the book, because 24 days scaled to a year implies €9,500 annually.
+
+At 2025-12-31: 1,000 customers scored, **€162,302** total revenue at risk, €62,175 of it in the
+High and Critical bands. Mean churn probability by segment orders sensibly — Frequent Buyer 0.041,
+Dormant Buyer 0.596.
 
 ---
 
@@ -116,6 +455,9 @@ Verified figures:
 Column-level definitions live in
 [`DATA_DICTIONARY_AND_VALIDATION.md`](DATA_DICTIONARY_AND_VALIDATION.md); the declarative
 machine-readable version the code actually uses is [`src/data/schema.py`](src/data/schema.py).
+
+The requirements this platform is built against are recorded in [`PROMPTS.md`](PROMPTS.md),
+Sections 0–7, with what has been delivered so far marked against each.
 
 ---
 
@@ -156,9 +498,25 @@ src/
 ├── data/
 │   ├── schema.py         declarative columns, dtypes, allowed values
 │   ├── csv_loader.py     THE reusable CSV utility (read-only, cached)
-│   └── validation.py     read-only data-quality checks
-├── features/             feature engineering            (not implemented yet)
-├── models/               churn model train/eval/predict (not implemented yet)
+│   └── validation.py     reusable per-file validation layer (read-only)
+├── features/
+│   ├── context.py        THE as-of clipping choke point (leakage guard)
+│   ├── params.py         every configurable threshold
+│   ├── builder.py        orchestrator: one row per Customer ID
+│   ├── rfm.py  gaps.py  trends.py  lifecycle.py
+│   ├── affinity.py  discount.py  returns.py  seasonality.py
+│   └── value.py  segments.py
+├── models/
+│   ├── labels.py         forward-looking churn label + censoring
+│   ├── splits.py         three-stage time split with embargoes
+│   ├── dataset.py        (customer, as-of date) panel builder
+│   ├── preprocessing.py  column selection: drops period markers
+│   ├── candidates.py     LogReg, RandomForest, LightGBM, XGBoost
+│   ├── evaluate.py       ranking + calibration + business metrics
+│   ├── train.py          select -> refit -> calibrate -> test once
+│   ├── predict.py        scoring and the predictions CSV
+│   ├── risk.py           risk bands and revenue at risk
+│   └── registry.py       model persistence with a feature contract
 ├── explainability/       SHAP + readable explanations   (not implemented yet)
 ├── segmentation/         value / risk / behaviour       (not implemented yet)
 ├── retention/            revenue at risk, ROI, actions  (not implemented yet)
@@ -171,8 +529,21 @@ app/                      Streamlit dashboard            (not implemented yet)
 models/                   serialised models (git-ignored)
 outputs/                  generated reports (git-ignored)
 logs/                     rotating log files (git-ignored)
-scripts/inspect_data.py   reproducible data profile + quality report
-tests/                    pytest suite
+scripts/
+├── validate_data.py      run the validation layer, write the JSON report
+├── inspect_data.py       full data profile + validation report
+├── build_features.py     build outputs/customer_features.csv
+├── train_model.py        train, select, calibrate, save the model
+└── predict.py            score customers -> predictions CSV
+PROMPTS.md                the build prompts, Sections 0-7, with delivery status
+tests/
+├── test_config.py        configuration and portable path resolution
+├── test_csv_loader.py    dtypes, encoding, the zero-padding trap
+├── test_validation.py    the validators CATCH synthetic bad data
+├── test_data_integrity.py the real CSVs satisfy every invariant
+├── test_features.py      feature arithmetic + the leakage proofs
+├── test_labels.py        label semantics, censoring, leakage
+└── test_models.py        split embargoes, risk bands, persistence
 ```
 
 ---
@@ -219,13 +590,27 @@ you want to point `DATA_DIR` at a shared location.
 ## Testing
 
 ```bash
-pytest              # whole suite
-pytest -k loader    # loader tests only
+pytest                            # whole suite: 267 tests
+pytest tests/test_validation.py   # the validation logic only
+pytest tests/test_features.py     # feature arithmetic and the leakage proofs
+pytest tests/test_labels.py       # label semantics and censoring
 ```
 
-The suite covers three things: that configuration resolves portably, that the loader preserves
-the dtypes and encodings the data actually needs, and that every referential and business
-invariant in the data still holds.
+The suite covers five things:
+
+1. **Configuration resolves portably** — no absolute path, no dependence on the working directory.
+2. **The loader preserves what the data needs** — dtypes, UTF-8 encoding, the `Order ID` padding.
+3. **The validators catch bad data** — [`test_validation.py`](tests/test_validation.py) builds a
+   small synthetic 4-table dataset, breaks exactly one thing (a duplicate key, a zero quantity, a
+   150% discount, an over-return, a return dated before its purchase, an order spanning two
+   customers…) and asserts the *specific named check* fails. Without these, a validator that
+   always returned `PASS` would look perfectly healthy.
+4. **The real CSVs satisfy every invariant** — [`test_data_integrity.py`](tests/test_data_integrity.py).
+5. **No feature sees the future** — [`test_features.py`](tests/test_features.py) proves it by
+   comparing a build at date T against a build from data truncated at T, and pins the feature
+   arithmetic (gaps, windows, growth, month counts) against hand-computed values.
+
+Points 3 and 4 are complementary and neither is sufficient alone.
 
 ---
 
@@ -243,14 +628,24 @@ Pins in [`requirements.txt`](requirements.txt) that are deliberate rather than i
 
 ## Next implementation step
 
-**Churn label definition and the customer-level feature store.**
+**Explainable churn prediction (SHAP).**
 
-1. Derive the as-of date from the data (2025-12-31) rather than hard-coding it.
-2. Compute **customer-specific expected purchase intervals** so that seasonal and
-   low-frequency buyers are not mislabelled as churned merely for being inactive — the brief
-   requires distinguishing true churn risk from normal, seasonal and new-customer inactivity.
-3. Build the feature table strictly *as of* the prediction date: RFM, purchase-trend and gap
-   features, lifecycle stage, seasonality scores, product affinity, discount/coupon behaviour,
-   return behaviour and customer value.
-4. Clip returns to the as-of date so finding 2 above cannot leak future information.
-5. Flag the right-censored newest cohort (finding 8) so it is excluded from training labels.
+1. Compute SHAP values for the saved LightGBM model and write global feature importance plus a
+   SHAP summary under `outputs/explainability/`.
+2. For every Medium, High and Critical customer, extract the top 3–5 local contributions and turn
+   them into readable sentences generated from the customer's actual feature values — *"the current
+   purchase gap is 2.8× this customer's historical average"*, not *"the model predicts churn"*.
+3. Write `outputs/customer_churn_explanations.csv` with driver rank, feature, feature value,
+   contribution, direction and the human-readable explanation.
+4. Reuse the vocabulary the feature layer already provides: `purchase_gap_ratio`,
+   `days_since_preferred_category_purchase`, `spend_decline_pct` and
+   `seasonally_explained_inactivity` all map directly onto driver sentences a CRM manager can act
+   on — the last one being what stops an explanation blaming a seasonal customer for being quiet.
+
+### Worth revisiting later
+
+The model's *ranking* only matches a single-feature heuristic. Two avenues, neither of which
+should be tuned against the test period: shorten the horizon (a 90-day label leaves far more
+timeline for training, since each embargo gap costs one horizon), or reduce the feature space —
+~130 features against a few hundred effective customers is the wrong ratio, and every candidate
+overfits heavily on the inner split.

@@ -17,26 +17,26 @@ import pytest
 
 from src.data import schema as sch
 from src.data.csv_loader import Datasets
-from src.data.validation import DataQualityReport
+from src.data.validation import ValidationReport
 
 
 # --- the report as a whole -----------------------------------------------------------
 
 
-def test_no_error_severity_check_fails(report: DataQualityReport) -> None:
-    failures = [f"{r.name}: {r.detail}" for r in report.errors]
+def test_no_error_severity_check_fails(report: ValidationReport) -> None:
+    failures = [f"{r.full_name}: {r.detail}" for r in report.errors]
     assert not failures, "data quality errors:\n  " + "\n  ".join(failures)
 
 
-def test_no_warnings_against_the_shipped_dataset(report: DataQualityReport) -> None:
+def test_no_warnings_against_the_shipped_dataset(report: ValidationReport) -> None:
     """Row counts and categorical domains should match the data as shipped."""
-    warnings = [f"{r.name}: {r.detail}" for r in report.warnings]
+    warnings = [f"{r.full_name}: {r.detail}" for r in report.warnings]
     assert not warnings, "data quality warnings:\n  " + "\n  ".join(warnings)
 
 
-def test_report_renders(report: DataQualityReport) -> None:
+def test_report_renders(report: ValidationReport) -> None:
     assert "checks passed" in report.to_markdown()
-    assert report.to_dict()["summary"]["total"] == len(report.results)
+    assert report.to_dict()["summary"]["total"] == len(report.checks)
 
 
 # --- key counts ----------------------------------------------------------------------

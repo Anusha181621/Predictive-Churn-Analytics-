@@ -6,7 +6,7 @@ import pytest
 
 from src.config.settings import Settings, get_settings
 from src.data.csv_loader import Datasets, load_all
-from src.data.validation import DataQualityReport, run_all_checks
+from src.data.validation import ValidationReport, validate_datasets
 
 
 @pytest.fixture(scope="session")
@@ -21,6 +21,6 @@ def data() -> Datasets:
 
 
 @pytest.fixture(scope="session")
-def report(data: Datasets) -> DataQualityReport:
-    """The full data quality report, computed once for the whole test session."""
-    return run_all_checks(data)
+def report(data: Datasets) -> ValidationReport:
+    """The full validation report over the real CSVs, computed once for the session."""
+    return validate_datasets(data)

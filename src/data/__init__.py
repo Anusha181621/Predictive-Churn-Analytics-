@@ -7,5 +7,27 @@ or mutates the source files, and there is deliberately no database, ingestion or
 """
 
 from src.data.csv_loader import Datasets, SchemaError, load_all
+from src.data.validation import (
+    ValidationReport,
+    compute_return_rate,
+    validate_customers,
+    validate_datasets,
+    validate_products,
+    validate_relationships,
+    validate_returns,
+    validate_transactions,
+)
 
-__all__ = ["Datasets", "SchemaError", "load_all"]
+__all__ = [
+    "Datasets",
+    "SchemaError",
+    "load_all",
+    "ValidationReport",
+    "compute_return_rate",
+    "validate_customers",
+    "validate_datasets",
+    "validate_products",
+    "validate_relationships",
+    "validate_returns",
+    "validate_transactions",
+]

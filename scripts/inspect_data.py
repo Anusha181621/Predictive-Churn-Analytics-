@@ -29,7 +29,7 @@ import pandas as pd  # noqa: E402
 from src.config.settings import ConfigError, get_settings  # noqa: E402
 from src.data import schema as sch  # noqa: E402
 from src.data.csv_loader import Datasets, SchemaError, load_all  # noqa: E402
-from src.data.validation import DataQualityReport, run_all_checks  # noqa: E402
+from src.data.validation import ValidationReport, validate_datasets  # noqa: E402
 from src.utils.logging_config import configure_logging, get_logger  # noqa: E402
 from src.utils.paths import ensure_dir  # noqa: E402
 
@@ -122,7 +122,7 @@ def _profile_relationships(data: Datasets) -> list[str]:
     return lines
 
 
-def _build_markdown(data: Datasets, report: DataQualityReport, settings) -> str:
+def _build_markdown(data: Datasets, report: ValidationReport, settings) -> str:
     txn = data.transactions
     lines = [
         "# Data profile",
@@ -208,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("%s", exc)
         return 2
 
-    report = run_all_checks(data)
+    report = validate_datasets(data)
 
     if not args.quiet:
         out = [_rule("SOURCE CSV FILES")]
@@ -218,8 +218,8 @@ def main(argv: list[str] | None = None) -> int:
             out.extend(_profile_table(table, frame))
         out.extend(_profile_relationships(data))
         out.append(_rule("DATA QUALITY CHECKS"))
-        for result in report.results:
-            out.append(f"  [{result.status:7s}] {result.name}: {result.detail}")
+        for result in report.checks:
+            out.append(f"  [{result.status:7s}] {result.full_name}: {result.detail}")
         counts = report.summary()
         out.append(
             f"\n  {counts['passed']}/{counts['total']} checks passed - "
@@ -232,11 +232,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_write:
         out_dir = ensure_dir(args.out or settings.outputs_dir)
         profile_path = out_dir / "data_profile.md"
-        json_path = out_dir / "data_quality_report.json"
         profile_path.write_text(_build_markdown(data, report, settings), encoding="utf-8")
-        json_path.write_text(report.to_json(), encoding="utf-8")
         logger.info("Wrote %s", profile_path)
-        logger.info("Wrote %s", json_path)
+        # Same report object, same writer as scripts/validate_data.py.
+        report.save(out_dir / "data_quality_report.json")
 
     if not report.ok:
         for failure in report.errors:
