@@ -5,11 +5,11 @@ It uses three years of customer, transaction, return and product history to answ
 questions: **who is likely to churn**, **why**, **how much revenue is at risk**, **what to do
 about it**, and **who to contact first**.
 
-> **Status: data layer + validation + feature store + churn model complete.**
+> **Status: data layer + validation + feature store + churn model + SHAP explainability complete.**
 > This repository contains the verified data layer, a reusable per-file validation layer, the
-> customer feature store (148 features, one row per Customer ID, as of a prediction date), and the
-> churn prediction model with time-based validation and calibrated probabilities. 267 tests pass.
-> The explainability layer, the retention engine and the dashboard are **not implemented yet**.
+> customer feature store (148 features as of a prediction date), the churn model with time-based
+> validation and calibrated probabilities, and per-customer SHAP explanations in plain English.
+> 312 tests pass. The retention engine and the dashboard are **not implemented yet**.
 > See [Next implementation step](#next-implementation-step).
 
 ---
@@ -66,7 +66,10 @@ python scripts/build_features.py
 python scripts/train_model.py
 python scripts/predict.py
 
-# 8. run the tests
+# 8. explain why each customer is at risk
+python scripts/explain.py
+
+# 9. run the tests
 pytest
 ```
 
@@ -517,7 +520,12 @@ src/
 │   ├── predict.py        scoring and the predictions CSV
 │   ├── risk.py           risk bands and revenue at risk
 │   └── registry.py       model persistence with a feature contract
-├── explainability/       SHAP + readable explanations   (not implemented yet)
+├── explainability/
+│   ├── shap_values.py    TreeSHAP, unwrapping + one-hot folding
+│   ├── narratives.py     phrase grammar + driver concept groups
+│   ├── global_explanations.py  importance, direction, dependence
+│   ├── customer_explanations.py  per-customer top-k drivers
+│   └── pipeline.py       CSVs -> features -> model -> SHAP -> sentences
 ├── segmentation/         value / risk / behaviour       (not implemented yet)
 ├── retention/            revenue at risk, ROI, actions  (not implemented yet)
 └── utils/
@@ -534,7 +542,8 @@ scripts/
 ├── inspect_data.py       full data profile + validation report
 ├── build_features.py     build outputs/customer_features.csv
 ├── train_model.py        train, select, calibrate, save the model
-└── predict.py            score customers -> predictions CSV
+├── predict.py            score customers -> predictions CSV
+└── explain.py            SHAP -> explanations CSV + global artefacts
 PROMPTS.md                the build prompts, Sections 0-7, with delivery status
 tests/
 ├── test_config.py        configuration and portable path resolution
@@ -543,7 +552,8 @@ tests/
 ├── test_data_integrity.py the real CSVs satisfy every invariant
 ├── test_features.py      feature arithmetic + the leakage proofs
 ├── test_labels.py        label semantics, censoring, leakage
-└── test_models.py        split embargoes, risk bands, persistence
+├── test_models.py        split embargoes, risk bands, persistence
+└── test_explainability.py  SHAP folding, sentence correctness, grouping
 ```
 
 ---
@@ -590,7 +600,7 @@ you want to point `DATA_DIR` at a shared location.
 ## Testing
 
 ```bash
-pytest                            # whole suite: 267 tests
+pytest                            # whole suite: 312 tests
 pytest tests/test_validation.py   # the validation logic only
 pytest tests/test_features.py     # feature arithmetic and the leakage proofs
 pytest tests/test_labels.py       # label semantics and censoring
@@ -626,21 +636,113 @@ Pins in [`requirements.txt`](requirements.txt) that are deliberate rather than i
 
 ---
 
+## Explainability (SHAP)
+
+```bash
+python scripts/explain.py                          # -> explanations CSV + global artefacts
+python scripts/explain.py --customer CUST0234      # one customer's driver block
+python scripts/explain.py --top-k 3 --risk-level High --risk-level Critical
+```
+
+### What "do not hardcode explanations" actually requires
+
+Natural language cannot appear from nowhere, so it is worth being precise. What is forbidden is an
+explanation whose *content* is fixed — a generic "the model predicts churn", or a canned top-five
+list that reads the same for everyone. What is required is that **which** drivers appear, **in what
+order**, and **every number in the sentence** all come from that customer's own SHAP contributions
+and feature values.
+
+[`narratives.py`](src/explainability/narratives.py) gives each feature a *phrase grammar* — a
+template, a formatter, and optional companion/context features — composed at runtime:
+
+```
+1. [^] Typically 41 days between orders — raising churn risk
+2. [^] Ordered in 4 months of their observable months — raising churn risk
+3. [v] Spreads spending across 4 categories (diversity 0.80 of 1) — lowering churn risk
+4. [^] EUR 2,751.85 of their spend came on discounted orders, higher than 83% of customers — raising churn risk
+5. [^] Has bought 24 items in total, higher than 67% of customers — raising churn risk
+```
+
+A test asserts that **every sentence quotes the value its own row reports**, so no sentence can have
+been written independently of the customer. Across 5,000 driver rows there are 1,907 distinct
+sentences. A feature with no vocabulary entry still gets a real composed sentence rather than a
+placeholder, so the driver list is never silently truncated to whatever happens to have nice wording.
+
+### Three problems solved before the numbers are usable
+
+**One-hot fragmentation.** The preprocessor expands `preferred_category` into one column per
+category, so raw SHAP would report five weak drivers instead of one real one. Contributions are
+summed back onto the source feature — valid because SHAP values are additive. Longest-prefix
+matching stops `category` from claiming `category_diversity`'s columns.
+
+**The calibration layer.** SHAP explains the model *before* probability calibration, because that is
+where the trees are. Calibration is monotone, so driver ranking and direction carry over exactly;
+what does not carry over is the arithmetic — contributions sum to the uncalibrated margin, not to
+the reported probability. Every artefact says so rather than implying a false additivity.
+
+**Near-duplicate features.** `median_purchase_gap` and `expected_purchase_interval_days` are the
+same number by construction, and an ungrouped top-five spent two slots on "typically 49 days between
+orders" and "typically orders every 49 days". Features are mapped onto **12 concept groups** and only
+each group's strongest contributor competes, so five slots buy five distinct reasons. An unmapped
+feature forms its own group, so nothing is silently merged.
+
+### Direction of impact is measured, not assumed
+
+Per feature, the Spearman correlation between its value and its own contribution. Beyond ±0.15 it is
+reported as directional; inside that band the model has learned a non-monotone relationship and the
+column says `mixed / non-monotone` rather than inventing a direction. **11 of 126 features** are
+non-monotone.
+
+### Global artefacts
+
+Under `outputs/explainability/`: `global_feature_importance.csv`, `shap_summary.csv` (the beeswarm as
+data — importance, mean signed contribution, direction and spread), `shap_dependence.csv` (binned
+value-versus-contribution curves for the top 12), `top_churn_drivers.md`, and
+`explainability_metadata.json`. Emitted as **data rather than PNGs** so the Streamlit dashboard can
+render them interactively with Plotly and filter them, which a static image cannot do — and so
+matplotlib is not a dependency for one chart.
+
+| Rank | Feature | Mean \|SHAP\| | Share | Direction |
+|---|---|---|---|---|
+| 1 | `category_diversity` | 0.1724 | 11.5% | higher values lower churn risk |
+| 2 | `subcategory_count` | 0.0692 | 4.6% | higher values lower churn risk |
+| 3 | `active_months` | 0.0687 | 4.6% | higher values raise churn risk |
+| 4 | `total_lines` | 0.0595 | 4.0% | higher values lower churn risk |
+| 5 | `revenue_from_discounted_orders` | 0.0534 | 3.5% | higher values raise churn risk |
+
+### Per-customer output
+
+`outputs/customer_churn_explanations.csv` — 5,000 rows (1,000 customers × 5 drivers), long format,
+with the brief's columns first: Customer ID, Churn probability, Risk level, Driver rank, Feature,
+Feature value, Contribution, Direction, Human-readable explanation. Long format on purpose:
+"every customer whose top driver is a widening purchase gap" is a one-line query on this shape.
+
+Drivers are ranked by **absolute** contribution, so the strongest *protective* factor is not hidden —
+a retention manager needs to know that a weekly ordering habit is the one thing still holding a
+customer. The `Direction` column carries the sign (2,827 increase risk, 2,173 reduce it).
+
+**Honest limitation.** `category_diversity` is the top driver for 554 of 1,000 customers and 11.5% of
+global importance — consistent with the permutation importance from Section 3, but not an intuitive
+churn signal. Combined with the model's ranking only matching a single-feature heuristic, this
+suggests part of its signal rests on a proxy rather than on the behavioural story. Worth revisiting
+alongside the feature-count reduction noted below.
+
+---
+
 ## Next implementation step
 
-**Explainable churn prediction (SHAP).**
+**Revenue at risk, segmentation and the retention recommendation engine (Section 5).**
 
-1. Compute SHAP values for the saved LightGBM model and write global feature importance plus a
-   SHAP summary under `outputs/explainability/`.
-2. For every Medium, High and Critical customer, extract the top 3–5 local contributions and turn
-   them into readable sentences generated from the customer's actual feature values — *"the current
-   purchase gap is 2.8× this customer's historical average"*, not *"the model predicts churn"*.
-3. Write `outputs/customer_churn_explanations.csv` with driver rank, feature, feature value,
-   contribution, direction and the human-readable explanation.
-4. Reuse the vocabulary the feature layer already provides: `purchase_gap_ratio`,
-   `days_since_preferred_category_purchase`, `spend_decline_pct` and
-   `seasonally_explained_inactivity` all map directly onto driver sentences a CRM manager can act
-   on — the last one being what stops an explanation blaming a seasonal customer for being quiet.
+1. Replace the interim revenue-at-risk estimate with a fuller expected-future-revenue model using
+   order frequency, average order value, recent behaviour and tenure.
+2. Build the 12 business segments (Champions, High-Value At Risk, Discount-Driven At Risk, …),
+   allowing a customer to carry several analytical dimensions rather than one rigid label.
+3. Retention opportunity score = churn probability × expected future revenue × retention propensity,
+   with the propensity assumption configurable and **clearly labelled as an assumption**.
+4. Personalised recommendations driven by the features already present: `is_full_price_buyer` for
+   who *not* to discount, `preferred_category` and `days_since_preferred_category_purchase` for what
+   to recommend, `seasonally_explained_inactivity` for who to leave alone.
+5. Write `outputs/customer_retention_scores.csv` and `outputs/retention_recommendations.csv`.
 
 ### Worth revisiting later
 
