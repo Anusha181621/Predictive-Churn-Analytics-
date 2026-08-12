@@ -1,0 +1,22 @@
+# Streamlit configuration for the fashion churn retention dashboard.
+#
+# The theme is pinned rather than left to the viewer's OS setting so that the
+# Plotly charts -- whose colours are validated against one specific surface --
+# always render on the surface they were checked against.
+
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#f9f9f7"
+secondaryBackgroundColor = "#fcfcfb"
+textColor = "#0b0b0b"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# Hide the Deploy button and developer menu: this is a business dashboard, and that chrome
+# invites a reader to treat it as an app under construction.
+toolbarMode = "minimal"
+showErrorDetails = "full"

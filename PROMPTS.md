@@ -6,8 +6,9 @@ code and any reviewer can check what was actually asked for against what was del
 ## Provenance and status
 
 Sections 0–2 are reproduced **as they were given to Claude Code** in the build session; Sections
-3–7 are transcribed from `Segmented Code Prompt.docx` at the workspace root and have **not been
-worked on yet**. `code prompt.txt` and `code Prompt.docx` hold an earlier, unsegmented version of
+3–7 are transcribed from `Segmented Code Prompt.docx` at the workspace root. Sections 0–6 have
+been built; Section 7, the final test and quality review, has not been run as a discrete pass.
+`code prompt.txt` and `code Prompt.docx` hold an earlier, unsegmented version of
 the same brief — see [the conflict note](#note-the-earlier-brief-contradicts-the-csv-first-rule)
 at the end, because it matters.
 
@@ -16,10 +17,10 @@ at the end, because it matters.
 | [0](#section-0--project-setup-for-a-csv-based-churn-platform) | Project setup, CSV loader, config, logging | **Delivered** |
 | [1](#section-1--csv-validation--relational-integrity) | Validation layer, `data_quality_report.json` | **Delivered** |
 | [2](#section-2--feature-engineering-from-csv-files) | Customer feature store, `customer_features.csv` | **Delivered** |
-| [3](#section-3--churn-prediction-model) | Churn model, time-based validation, predictions | Not started |
-| [4](#section-4--explainable-churn-prediction) | SHAP, per-customer churn drivers | Not started |
-| [5](#section-5--revenue-risk-segmentation--recommendations) | Revenue at risk, segments, retention actions | Not started |
-| [6](#section-6--streamlit-retention-dashboard) | Eight-page Streamlit dashboard | Not started |
+| [3](#section-3--churn-prediction-model) | Churn model, time-based validation, predictions | **Delivered** |
+| [4](#section-4--explainable-churn-prediction) | SHAP, per-customer churn drivers | **Delivered** |
+| [5](#section-5--revenue-risk-segmentation--recommendations) | Revenue at risk, segments, retention actions | **Delivered** |
+| [6](#section-6--streamlit-retention-dashboard) | Eight-page Streamlit dashboard | **Delivered** |
 | [7](#section-7--testing--finalization) | Full test and quality review | Not started |
 
 **Formatting note.** Wording is unchanged. The only edits are mechanical: `•` bullets became
@@ -545,7 +546,7 @@ At the end, report:
 
 # Section 3 — Churn Prediction Model
 
-> Not started.
+> **Delivered.**
 
 Continue from the existing project.
 
@@ -673,7 +674,7 @@ At the end report:
 
 # Section 4 — Explainable Churn Prediction
 
-> Not started.
+> **Delivered.**
 
 Continue from the existing project.
 
@@ -742,7 +743,7 @@ outputs/explainability/
 
 # Section 5 — Revenue Risk, Segmentation & Recommendations
 
-> Not started.
+> **Delivered.**
 
 Continue from the existing project.
 
@@ -841,7 +842,7 @@ Do not hardcode recommendations.
 
 # Section 6 — Streamlit Retention Dashboard
 
-> Not started.
+> **Delivered.**
 
 Continue from the existing project.
 

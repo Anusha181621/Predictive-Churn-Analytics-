@@ -5,12 +5,12 @@ It uses three years of customer, transaction, return and product history to answ
 questions: **who is likely to churn**, **why**, **how much revenue is at risk**, **what to do
 about it**, and **who to contact first**.
 
-> **Status: everything except the dashboard.**
+> **Status: complete, end to end.**
 > Data layer, per-file validation, the customer feature store (148 features as of a prediction
 > date), the churn model with time-based validation and calibrated probabilities, per-customer SHAP
-> explanations in plain English, and the retention decision layer — revenue at risk, twelve
-> segments, prioritisation and personalised recommendations. 358 tests pass. The Streamlit
-> dashboard is **not implemented yet**. See [Next implementation step](#next-implementation-step).
+> explanations in plain English, the retention decision layer — revenue at risk, twelve segments,
+> prioritisation and personalised recommendations — and the eight-page Streamlit dashboard.
+> 358 tests pass. Run it with `streamlit run app/dashboard.py`; see [Dashboard](#dashboard).
 
 ---
 
@@ -34,6 +34,10 @@ data/*.csv  ->  csv_loader  ->  validation  ->  features  ->  churn model  ->  S
                                                                   |
                                                                   +-> Streamlit dashboard
 ```
+
+The dashboard is the last box and nothing more: it reads the artefacts the stages before it wrote
+and renders them. The one exception is the What-If simulator, which re-runs the real retention
+layer rather than reimplementing its arithmetic in the browser.
 
 ---
 
@@ -72,7 +76,10 @@ python scripts/explain.py
 # 9. build the retention decision layer
 python scripts/retention.py
 
-# 10. run the tests
+# 10. open the dashboard
+streamlit run app/dashboard.py
+
+# 11. run the tests
 pytest
 ```
 
@@ -529,7 +536,7 @@ src/
 │   ├── global_explanations.py  importance, direction, dependence
 │   ├── customer_explanations.py  per-customer top-k drivers
 │   └── pipeline.py       CSVs -> features -> model -> SHAP -> sentences
-├── segmentation/         value / risk / behaviour       (not implemented yet)
+├── segmentation/         empty: this work lives in retention/segments.py
 ├── retention/
 │   ├── params.py         assumptions, kept separate from policy inputs
 │   ├── value.py          expected future revenue (frequency x value)
@@ -541,8 +548,14 @@ src/
     ├── paths.py          the ONLY place path logic lives
     └── logging_config.py idempotent logging setup
 
-app/                      Streamlit dashboard            (not implemented yet)
-├── components/  charts/  pages/
+app/                      Streamlit dashboard
+├── dashboard.py          entry point: st.navigation over the eight pages
+├── data_access.py        cached readers + the joined customer master frame
+├── theme.py              palette, Plotly template, card styling
+├── formatting.py         one shape for every currency / percentage / count
+├── components/           kpi.py  filters.py  tables.py  layout.py
+├── charts/               distributions.py  breakdowns.py  model.py
+└── views/                one module per page (NOT `pages/` — see below)
 models/                   serialised models (git-ignored)
 outputs/                  generated reports (git-ignored)
 logs/                     rotating log files (git-ignored)
@@ -856,19 +869,71 @@ cannibalises from customers who would have bought anyway, which needs a control 
 
 ---
 
-## Next implementation step
+## Dashboard
 
-**The Streamlit dashboard (Section 6).**
+```bash
+streamlit run app/dashboard.py
+```
 
-1. `streamlit run app/dashboard.py`, reading `data/*.csv` and `outputs/*.csv` — no database.
-2. Eight pages: Executive Overview, Churn Risk, Revenue at Risk, Retention Action Center,
-   Customer 360, Customer Segmentation, What-If Simulator, Model Performance.
-3. Every number sourced from the artefacts already produced; no placeholder metrics.
-4. The SHAP artefacts were emitted as **data rather than images** precisely so this step can render
-   them interactively in Plotly and filter them.
-5. The What-If Simulator has an obvious first job: sweep the propensity assumption and the discount
-   depth, since both are already parameterised and the ROI response to them is the main thing a CRM
-   manager should be allowed to stress-test.
+Eight pages — Executive Overview, Churn Risk, Revenue at Risk, Retention Action Center,
+Customer 360, Customer Segmentation, What-If Simulator, Model Performance — reading `data/*.csv`,
+`outputs/*.csv` and `models/*`. No database, no new pipeline. If an artefact has not been generated
+yet the page names the missing file and the command that produces it, rather than raising.
+
+### One name for revenue at risk
+
+Two figures exist and both are correct, so the dashboard commits to one:
+
+| Column | Definition | Total |
+|---|---|---|
+| **Revenue at risk** (used everywhere) | churn probability × expected future revenue | **EUR 125,129** |
+| Revenue at risk (model estimate) | churn × lifetime × horizon / max(tenure, horizon) | EUR 162,302 |
+
+The brief defines revenue at risk as *churn probability × expected future revenue*, which is the
+retention layer's figure, so that is the one every business page shows. The model's own estimate
+appears only on Model Performance, under an explicit name. They are never added together.
+
+Similarly, **expected retained revenue on the overview counts targeted customers only**
+(EUR 37,265), so it reconciles with the campaign cost and ROI beside it. The all-customer figure
+is EUR 39,040; pairing that with a targeted-only cost would report ROI as +463% instead of +437%.
+
+### The What-If simulator re-runs the real decision layer
+
+It builds a modified `RetentionParams` and calls `build_retention_layer` — the same code path as
+`scripts/retention.py` — rather than rescaling the shipped columns. That matters because propensity
+and contact cost both feed the ROI guardrail that decides *who gets contacted at all*: raise the
+cost and customers drop out of the campaign, which no linear rescale reproduces. At its default
+slider positions it reproduces the shipped plan exactly (779 targeted, EUR 6,935, +437%), and at
+`--propensity 0.15` it reproduces that run too (745 targeted, +369%). Each new scenario costs about
+five seconds and is cached; the propensity sweep is opt-in behind a button for that reason.
+
+### Two Streamlit details that are load-bearing
+
+**The page modules live in `app/views/`, not `app/pages/`.** `pages/` is a magic directory name:
+a folder of that name beside the entry script makes Streamlit build *automatic* multi-page
+navigation at start-up, before the script runs. That duplicates every page in the sidebar — and,
+because the automatic scan builds a `Page` from the resolved path of the entry script, it fails
+outright when the project sits on a Windows network share, since `st.Page` rejects UNC paths by
+design so that resolving one cannot open an SMB connection and disclose the server's credentials.
+Naming the folder `views` avoids the magic directory; navigation is exactly what `dashboard.py`
+declares.
+
+**The What-If page imports scikit-learn, LightGBM and SHAP lazily.** `dashboard.py` imports every
+view module at start-up, so importing them at module level made all eight pages wait about twenty
+seconds for libraries only one page uses. They are imported inside the functions that need them.
+
+### Charts
+
+One shared Plotly template, so the eight pages read as one system. Risk levels wear a reserved
+status palette (good → critical); everything else takes a fixed categorical slot, assigned by
+entity so filtering never repaints the survivors. The palette was checked with a validator rather
+than by eye: all eight slots sit inside the lightness band and clear the chroma floor, and the
+worst adjacent pair separates by ΔE 9.1 under protanopia against a target of 8. Three slots fall
+below 3:1 contrast on the chart surface, which is why every chart also ships a sortable table and
+a CSV export.
+
+The SHAP artefacts were emitted as data rather than images precisely so Model Performance can
+render and filter them interactively.
 
 ### Worth revisiting later
 
