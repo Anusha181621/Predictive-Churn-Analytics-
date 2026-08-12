@@ -68,8 +68,11 @@ __all__ = [
 ACTIVE_RECENCY_DAYS = 180
 
 #: At or above this churn probability a customer is counted as at risk. It is the Low/Medium
-#: band edge, so "at risk" means exactly "not in the Low band".
-AT_RISK_PROBABILITY = 0.30
+#: band edge, so "at risk" means exactly "not in the Low band" -- and it is read from
+#: ``RISK_THRESHOLD_MEDIUM`` rather than restated here, because a literal would let the KPI
+#: disagree with the very bands the pipeline assigned. Resolved once at import: the dashboard is
+#: a fresh process per ``streamlit run``, so a configuration change arrives with the restart.
+AT_RISK_PROBABILITY = get_settings().risk_threshold_medium
 
 
 @dataclass(frozen=True)

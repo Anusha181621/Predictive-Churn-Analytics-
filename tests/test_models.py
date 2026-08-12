@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.config.settings import Settings
 from src.models.preprocessing import EXCLUDED_COLUMNS, feature_matrix, split_feature_columns
 from src.models.registry import (
     FeatureMismatchError,
@@ -166,27 +167,60 @@ def test_identity_features_are_named_for_exclusion() -> None:
 # RISK BANDS
 # ======================================================================================
 
+#: Small step used to probe just below a band edge, so "inclusive at the lower edge" is asserted
+#: rather than assumed. Small enough not to cross a neighbouring edge at any sane configuration.
+_EPSILON = 1e-9
+
+
+def _band_probe(edge: str, settings: Settings) -> float:
+    """Resolve a band-edge name to the probability that sits on it."""
+    if edge == "floor":
+        return 0.0
+    if edge == "ceiling":
+        return 1.0
+    return float(getattr(settings, f"risk_threshold_{edge}"))
+
 
 @pytest.mark.parametrize(
-    ("probability", "expected"),
+    ("edge", "offset", "expected"),
     [
-        (0.0, "Low"),
-        (0.29, "Low"),
-        (0.30, "Medium"),      # lower edge inclusive
-        (0.59, "Medium"),
-        (0.60, "High"),
-        (0.79, "High"),
-        (0.80, "Critical"),
-        (1.0, "Critical"),
+        ("floor", 0.0, "Low"),
+        ("medium", -_EPSILON, "Low"),
+        ("medium", 0.0, "Medium"),      # lower edge inclusive
+        ("high", -_EPSILON, "Medium"),
+        ("high", 0.0, "High"),
+        ("critical", -_EPSILON, "High"),
+        ("critical", 0.0, "Critical"),
+        ("ceiling", 0.0, "Critical"),
     ],
 )
-def test_risk_bands_follow_the_configured_thresholds(probability: float, expected: str) -> None:
+def test_risk_bands_follow_the_configured_thresholds(
+    edge: str, offset: float, expected: str, settings: Settings
+) -> None:
+    """Each band edge is inclusive at its lower bound, wherever configuration puts it.
+
+    The probes are derived from the settings rather than written as literal 0.30 / 0.60 / 0.80,
+    because the bands are configurable and the assertion is about *banding*, not about the default
+    values. Pinning the defaults made this test fail on any custom ``RISK_THRESHOLD_*`` while
+    saying nothing about whether ``assign_risk_level`` respects the configuration it is given.
+    """
+    probability = _band_probe(edge, settings) + offset
     assert assign_risk_level(pd.Series([probability])).iloc[0] == expected
 
 
-def test_risk_levels_are_ordered_by_severity() -> None:
+def test_risk_levels_are_ordered_by_severity(settings: Settings) -> None:
     """So charts and sorts put Critical last, not alphabetically between High and Low."""
-    bands = assign_risk_level(pd.Series([0.9, 0.1, 0.7, 0.4]))
+    # One probability per band, taken at each band's inclusive lower edge so the sample covers
+    # all four bands under any threshold configuration.
+    one_per_band = pd.Series(
+        [
+            settings.risk_threshold_critical,
+            0.0,
+            settings.risk_threshold_high,
+            settings.risk_threshold_medium,
+        ]
+    )
+    bands = assign_risk_level(one_per_band)
     assert list(bands.sort_values()) == ["Low", "Medium", "High", "Critical"]
 
 

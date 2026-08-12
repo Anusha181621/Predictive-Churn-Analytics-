@@ -26,11 +26,13 @@ from app.data_access import (
 )
 from app.formatting import integer, money, money_compact, percent, signed_percent
 from app.theme import RISK_COLOURS, RISK_ORDER
+from src.config.settings import get_settings
 
 
 def render() -> None:
     require("features", "predictions", "scores", "recommendations", "explanations")
 
+    settings = get_settings()
     master = load_customer_master()
     as_of = prediction_date(master)
     summary = campaign_summary(master)
@@ -73,8 +75,18 @@ def render() -> None:
                 f"Churn probability ≥ {AT_RISK_PROBABILITY:.0%} · {percent(at_risk / total)}",
                 tone="bad" if at_risk / total > 0.5 else "neutral",
             ),
-            Kpi("High risk", integer(high), "60% ≤ churn probability < 80%"),
-            Kpi("Critical risk", integer(critical), "Churn probability ≥ 80%", tone="bad"),
+            Kpi(
+                "High risk",
+                integer(high),
+                f"{settings.risk_threshold_high:.0%} ≤ churn probability "
+                f"< {settings.risk_threshold_critical:.0%}",
+            ),
+            Kpi(
+                "Critical risk",
+                integer(critical),
+                f"Churn probability ≥ {settings.risk_threshold_critical:.0%}",
+                tone="bad",
+            ),
         ]
     )
 
@@ -123,7 +135,7 @@ def render() -> None:
         chart_card(
             "Customers by risk level",
             "Bands are configurable; the lower edge is inclusive, so a probability of exactly "
-            "0.60 is High.",
+            f"{settings.risk_threshold_high:.2f} is High.",
         )
         st.plotly_chart(
             risk_level_distribution(master), width="stretch", key="exec_risk_levels"

@@ -494,8 +494,11 @@ the smooth sigmoid for exactly this reason.
 Prediction date, Churn probability, Risk level, Customer value, Lifetime revenue, Recent revenue,
 Recency, Frequency, Revenue at risk — plus diagnostics the later sections need.
 
-Risk bands are configurable (`RISK_THRESHOLD_*`), with the lower edge inclusive so `p = 0.60` is
-High: Low < 0.30 ≤ Medium < 0.60 ≤ High < 0.80 ≤ Critical.
+Risk bands are configurable (`RISK_THRESHOLD_*`), with the lower edge inclusive. **At the default
+thresholds**: Low < 0.30 ≤ Medium < 0.60 ≤ High < 0.80 ≤ Critical, so `p = 0.60` is High. Change
+those settings and the bands move — but the stored `Risk level` column is written at prediction
+time, so re-run `python scripts/predict.py` (and `retention.py`, which segments on the same edges)
+for the change to reach the artefacts and the dashboard.
 
 **Revenue at risk** = `churn probability × lifetime revenue × horizon / max(tenure, horizon)`. The
 `max(tenure, horizon)` denominator refuses to extrapolate past observed history. Annualising
@@ -922,6 +925,10 @@ At 2025-12-31: **€585,966** expected future revenue over 180 days, **€125,12
 | Lost Customers | 16 | 16 |
 | Seasonal Customers | 5 | 73 |
 | Low-Value At Risk | 3 | 21 |
+
+Counts are at the **default** `RISK_THRESHOLD_*` values, since the at-risk segments band on the same
+configured edges as the model's own risk levels. Raising `RISK_THRESHOLD_MEDIUM` to 0.50, for
+instance, moves 207 customers out of Discount-Driven At Risk.
 
 The gap between the columns *is* the point — the brief asks that customers carry several analytical
 dimensions rather than one rigid label. A High-Return Customer who is also High-Value At Risk needs

@@ -116,9 +116,9 @@ def build_segments(
     ).fillna(False)
 
     # Risk bands come from the model's own configured thresholds, carried on the prediction.
-    high_risk = churn.ge(0.60)
-    medium_risk = churn.ge(0.30)
-    low_risk = churn.lt(0.30)
+    high_risk = churn.ge(params.risk_high_threshold)
+    medium_risk = churn.ge(params.risk_medium_threshold)
+    low_risk = churn.lt(params.risk_medium_threshold)
 
     high_value = value_percentile.ge(params.high_value_percentile)
     low_value = value_percentile.lt(params.low_value_percentile)

@@ -30,6 +30,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from src.config.settings import get_settings
+
 __all__ = ["RetentionParams", "PRIORITY_BANDS"]
 
 #: Priority bands, from most to least urgent, applied to the retention opportunity percentile.
@@ -114,6 +116,19 @@ class RetentionParams:
     #: itself"; raise it to demand a margin.
     min_expected_roi: float = 0.0
 
+    # ------------------------------------------------------------------ churn risk bands
+    #: Churn-probability edges of the Medium and High risk bands. These default to the platform's
+    #: configured thresholds (``RISK_THRESHOLD_MEDIUM`` / ``RISK_THRESHOLD_HIGH``) rather than to
+    #: literals, so the segments band a customer exactly where the model's own ``risk_level`` puts
+    #: them. Restating the numbers here was the bug that let a CRM manager move the bands in `.env`
+    #: and see the risk levels change while "High-Value At Risk" kept using the old edge.
+    risk_medium_threshold: float = field(
+        default_factory=lambda: get_settings().risk_threshold_medium
+    )
+    risk_high_threshold: float = field(
+        default_factory=lambda: get_settings().risk_threshold_high
+    )
+
     # ------------------------------------------------------------------ segmentation thresholds
     #: Value percentile at or above which a customer counts as high value for segmentation.
     high_value_percentile: float = 0.80
@@ -189,6 +204,11 @@ class RetentionParams:
             raise ValueError("max_projection_multiple must be at least 1")
         if not 0.0 < self.low_value_percentile < self.high_value_percentile < 1.0:
             raise ValueError("value percentiles must satisfy 0 < low < high < 1")
+        if not 0.0 < self.risk_medium_threshold < self.risk_high_threshold < 1.0:
+            raise ValueError(
+                "risk band thresholds must satisfy 0 < medium < high < 1, got "
+                f"medium={self.risk_medium_threshold}, high={self.risk_high_threshold}"
+            )
         if not (
             0.0
             < self.medium_priority_percentile
@@ -251,6 +271,8 @@ class RetentionParams:
         return {
             "currency": self.currency,
             "revenue_horizon_days": self.revenue_horizon_days,
+            "risk_medium_threshold": self.risk_medium_threshold,
+            "risk_high_threshold": self.risk_high_threshold,
             "communication_cost": self.communication_cost,
             "campaign_overhead_per_customer": self.campaign_overhead_per_customer,
             "free_shipping_cost": self.free_shipping_cost,
