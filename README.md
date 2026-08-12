@@ -62,13 +62,29 @@ documented escape hatch.
 ## The workflow
 
 Five steps, from four CSV files to an interactive dashboard. Requires **Python 3.11+** (verified
-on CPython 3.14 / Windows).
+on CPython 3.14 / Windows). There is nothing else to provision: no database to start, no service to
+register, no API key, and no `.env` — every setting has a working default. Copy `.env.example` to
+`.env` only if you want to change one.
+
+### 0. Install
+
+```powershell
+# Windows PowerShell
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
 
 ```bash
-# 0. install
-python -m venv .venv && .venv\Scripts\activate    # Windows
+# macOS / Linux
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+```
 
+### 1-5. Build the artefacts, then start the dashboard
+
+```bash
 # 1. place the four CSV files in data/
 #    Customer.csv  Transaction.csv  Return.csv  Product.csv
 
@@ -92,8 +108,29 @@ also shows *why* each customer is at risk and *what to do about it*, which are t
 and retention artefacts. Running only `predict.py` still works — the pages that need the other two
 say which command produces what they are missing, instead of failing.
 
-No `.env` is required: every setting has a working default. Copy `.env.example` to `.env` only if
-you want to change one.
+Steps 2-4 take a few minutes in total and each script is idempotent, so re-running one is safe.
+They are batch CLIs that exit when done; only step 5 stays in the foreground.
+
+### Starting the dashboard when the environment is already built
+
+`.venv/`, `models/` and `outputs/` are git-ignored — they persist locally but never arrive with a
+clone. When they are already in place, steps 0-4 are done and starting the dashboard is the whole
+procedure:
+
+```powershell
+cd <project root>
+.venv\Scripts\activate
+streamlit run app\dashboard.py
+```
+
+Streamlit prints a local URL — **http://localhost:8501** by default — and holds the terminal until
+`Ctrl+C`. Add `--server.port 8502` if that port is taken, or `--server.headless true` to keep it
+from opening a browser.
+
+**Launch it from the project root.** The data paths themselves do not care about the working
+directory, because [`src/utils/paths.py`](src/utils/paths.py) anchors every relative setting to the
+repo root via `Path(__file__).resolve().parents[2]` rather than to `cwd`. But `.streamlit/config.toml`
+is only read from the directory you launch from, so starting elsewhere silently loses the theme.
 
 ### Optional, and useful before the first run
 
@@ -105,6 +142,24 @@ pytest                              # 456 tests
 
 Both scripts exit non-zero if any error-severity check fails, so either works as a pipeline or
 CI gate — worth running first when the CSVs have been refreshed.
+
+### If it does not start
+
+| Symptom | Cause and fix |
+|---|---|
+| `streamlit: command not found` / not recognised | The virtual environment is not active. Activate it, or skip activation and call the interpreter directly: `.venv\Scripts\python.exe -m streamlit run app\dashboard.py` |
+| A page reports a missing artefact | That step has not been run. The page names the file *and* the command that produces it — run that command. Nothing else on the page fails meanwhile. |
+| `ConfigError` naming one or more CSVs | A source file is absent from `data/`. `Settings.validate_files()` lists each one by resolved path. |
+| `joblib.load` warns or fails on the model | `models/churn_model.joblib` was written by a different scikit-learn version. Re-run `python scripts/train_model.py`. |
+| The theme looks wrong (dark or unstyled) | Started from a different directory — see above. |
+| Port 8501 already in use | `streamlit run app\dashboard.py --server.port 8502` |
+
+The dashboard exposes a health endpoint while running, which is the quickest confirmation that the
+server is actually up rather than merely launched:
+
+```bash
+curl http://localhost:8501/_stcore/health     # -> ok
+```
 
 ### Loading the data in your own code
 
@@ -656,7 +711,9 @@ pytest tests/test_recommendation_personas.py  # the nine customer types
 
 **456 tests, and 48 of them skip on a fresh clone.** `outputs/` and `models/` are git-ignored, so
 the tests that need generated artefacts skip with the command that produces them rather than
-failing. Nothing is silently not run: `pytest -q` reports the skips and why.
+failing. Nothing is silently not run: `pytest -q` reports the skips and why. Once steps 2-4 of
+[the workflow](#the-workflow) have been run, those 48 have their artefacts and the full 456 execute
+— a clean run reports `456 passed` with no skips, and takes about three minutes.
 
 | Suite | What it pins |
 |---|---|
@@ -918,8 +975,11 @@ cannibalises from customers who would have bought anyway, which needs a control 
 ## Dashboard
 
 ```bash
-streamlit run app/dashboard.py
+streamlit run app/dashboard.py        # -> http://localhost:8501, Ctrl+C to stop
 ```
+
+Run it from the project root, with the virtual environment active; see
+[the workflow](#the-workflow) for the full procedure and the troubleshooting table.
 
 Eight pages — Executive Overview, Churn Risk, Revenue at Risk, Retention Action Center,
 Customer 360, Customer Segmentation, What-If Simulator, Model Performance — reading `data/*.csv`,
