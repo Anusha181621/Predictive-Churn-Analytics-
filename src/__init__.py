@@ -11,17 +11,21 @@ config
 data
     CSV schema declarations, the reusable CSV loader, and read-only data validation.
 features
-    Customer-level feature engineering (next implementation step).
+    Customer-level feature engineering: 148 features, computed strictly as of a prediction date.
 models
-    Churn model training, evaluation and prediction (not implemented yet).
+    Churn labelling, time-based validation with embargoes, training, calibration and scoring.
 explainability
-    SHAP and human-readable churn driver explanations (not implemented yet).
+    SHAP contributions and the phrase grammar that turns them into per-customer sentences.
 segmentation
-    Value/risk/behaviour segmentation (not implemented yet).
+    Empty. The value/risk/behaviour segmentation described in the brief is implemented in
+    :mod:`src.retention.segments`, alongside the scoring that consumes it.
 retention
-    Revenue at risk, retention ROI and the recommendation engine (not implemented yet).
+    Expected future revenue, revenue at risk, the twelve segments, prioritisation and the
+    recommendation engine.
 utils
     Cross-cutting helpers: path resolution and logging configuration.
+
+The Streamlit dashboard that reads the artefacts these packages produce lives in ``app/``.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

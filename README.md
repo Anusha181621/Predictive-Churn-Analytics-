@@ -10,7 +10,7 @@ about it**, and **who to contact first**.
 > date), the churn model with time-based validation and calibrated probabilities, per-customer SHAP
 > explanations in plain English, the retention decision layer — revenue at risk, twelve segments,
 > prioritisation and personalised recommendations — and the eight-page Streamlit dashboard.
-> 358 tests pass. Run it with `streamlit run app/dashboard.py`; see [Dashboard](#dashboard).
+> 456 tests pass. Run it with `streamlit run app/dashboard.py`; see [Dashboard](#dashboard).
 
 ---
 
@@ -39,53 +39,72 @@ The dashboard is the last box and nothing more: it reads the artefacts the stage
 and renders them. The one exception is the What-If simulator, which re-runs the real retention
 layer rather than reimplementing its arithmetic in the browser.
 
+### The constraint is enforced, not just documented
+
+[`tests/test_architecture.py`](tests/test_architecture.py) turns each clause into a test, so the
+architecture cannot drift the next time somebody adds a convenient dependency:
+
+| Claim | How it is checked |
+|---|---|
+| No database is required | No driver or ORM is imported anywhere (parsed via AST, so a name in a comment cannot false-positive); no `CREATE TABLE`/`INSERT`/`create_engine`/`.execute(`; `requirements.txt` declares none |
+| No ETL pipeline is required | No Airflow / Prefect / Dagster / Luigi / Celery / Spark import |
+| No ingestion service exists | No web or ASGI framework; every `scripts/*.py` is a batch CLI with a `main()` that exits, and contains no `while True`, `serve_forever` or socket use |
+| Original CSVs remain untouched | **The four files are hashed, the pipeline is run over them, and they are hashed again.** No write in the codebase targets a source-data path, and `csv_loader.py` contains no write call at all |
+| CSV files are the source of truth | Only the loader reads them. The dashboard reads `outputs/*.csv`, which are generated artefacts the loader could not parse anyway — a different act, asserted separately |
+| Dashboard works from CSV-based outputs | Every artefact it declares lives in `outputs/` or `models/` and names the script that produces it; the app imports no database or API client |
+
+Portability is covered too: no absolute path is hardcoded, relative settings resolve against the
+project root rather than the working directory, and an absolute override is honoured as the
+documented escape hatch.
+
 ---
 
-## Quickstart
+## The workflow
 
-Requires **Python 3.11+** (verified on CPython 3.14 / Windows).
+Five steps, from four CSV files to an interactive dashboard. Requires **Python 3.11+** (verified
+on CPython 3.14 / Windows).
 
 ```bash
-# 1. create and activate a virtual environment
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS / Linux
-
-# 2. install dependencies
+# 0. install
+python -m venv .venv && .venv\Scripts\activate    # Windows
 pip install -r requirements.txt
 
-# 3. (optional) configure — every setting already has a working default
-copy .env.example .env          # Windows;  cp .env.example .env elsewhere
+# 1. place the four CSV files in data/
+#    Customer.csv  Transaction.csv  Return.csv  Product.csv
 
-# 4. validate the CSV files
-python scripts/validate_data.py
-
-# 5. profile the data (schema, dtypes, distributions) as well
-python scripts/inspect_data.py
-
-# 6. build the customer feature table
+# 2. generate features
 python scripts/build_features.py
 
-# 7. train the churn model and score every customer
+# 3. train the model
 python scripts/train_model.py
+
+# 4. generate predictions, explanations and retention actions
 python scripts/predict.py
-
-# 8. explain why each customer is at risk
 python scripts/explain.py
-
-# 9. build the retention decision layer
 python scripts/retention.py
 
-# 10. open the dashboard
+# 5. start the dashboard
 streamlit run app/dashboard.py
+```
 
-# 11. run the tests
-pytest
+Step 4 is three commands rather than one because the dashboard shows more than a probability: it
+also shows *why* each customer is at risk and *what to do about it*, which are the explainability
+and retention artefacts. Running only `predict.py` still works — the pages that need the other two
+say which command produces what they are missing, instead of failing.
+
+No `.env` is required: every setting has a working default. Copy `.env.example` to `.env` only if
+you want to change one.
+
+### Optional, and useful before the first run
+
+```bash
+python scripts/validate_data.py     # 101 checks over the four CSVs -> outputs/data_quality_report.json
+python scripts/inspect_data.py      # the above, plus a full data profile -> outputs/data_profile.md
+pytest                              # 456 tests
 ```
 
 Both scripts exit non-zero if any error-severity check fails, so either works as a pipeline or
-CI gate. `validate_data.py` writes `outputs/data_quality_report.json`; `inspect_data.py` writes
-that plus [`outputs/data_profile.md`](outputs/).
+CI gate — worth running first when the CSVs have been refreshed.
 
 ### Loading the data in your own code
 
@@ -569,6 +588,7 @@ scripts/
 └── retention.py          segments, scores, recommendations
 PROMPTS.md                the build prompts, Sections 0-7, with delivery status
 tests/
+├── test_architecture.py  no DB/ETL/API; the CSVs are provably unmodified
 ├── test_config.py        configuration and portable path resolution
 ├── test_csv_loader.py    dtypes, encoding, the zero-padding trap
 ├── test_validation.py    the validators CATCH synthetic bad data
@@ -577,7 +597,10 @@ tests/
 ├── test_labels.py        label semantics, censoring, leakage
 ├── test_models.py        split embargoes, risk bands, persistence
 ├── test_explainability.py  SHAP folding, sentence correctness, grouping
-└── test_retention.py     projection caps, ROI guardrails, recommendations
+├── test_retention.py     projection caps, ROI guardrails, recommendations
+├── test_recommendation_personas.py  the brief's nine customer types
+├── test_end_to_end.py    the real chain: scoring, live SHAP, campaign economics
+└── test_dashboard.py     every page rendered; artefact totals reconcile
 ```
 
 ---
@@ -624,27 +647,50 @@ you want to point `DATA_DIR` at a shared location.
 ## Testing
 
 ```bash
-pytest                            # whole suite: 358 tests
-pytest tests/test_validation.py   # the validation logic only
-pytest tests/test_features.py     # feature arithmetic and the leakage proofs
-pytest tests/test_labels.py       # label semantics and censoring
+pytest                                      # whole suite: 456 tests
+pytest tests/test_architecture.py           # the CSV-first constraint, as executable checks
+pytest tests/test_validation.py             # the validation logic only
+pytest tests/test_features.py               # feature arithmetic and the leakage proofs
+pytest tests/test_recommendation_personas.py  # the nine customer types
 ```
 
-The suite covers five things:
+**456 tests, and 48 of them skip on a fresh clone.** `outputs/` and `models/` are git-ignored, so
+the tests that need generated artefacts skip with the command that produces them rather than
+failing. Nothing is silently not run: `pytest -q` reports the skips and why.
 
-1. **Configuration resolves portably** — no absolute path, no dependence on the working directory.
-2. **The loader preserves what the data needs** — dtypes, UTF-8 encoding, the `Order ID` padding.
-3. **The validators catch bad data** — [`test_validation.py`](tests/test_validation.py) builds a
-   small synthetic 4-table dataset, breaks exactly one thing (a duplicate key, a zero quantity, a
-   150% discount, an over-return, a return dated before its purchase, an order spanning two
-   customers…) and asserts the *specific named check* fails. Without these, a validator that
-   always returned `PASS` would look perfectly healthy.
-4. **The real CSVs satisfy every invariant** — [`test_data_integrity.py`](tests/test_data_integrity.py).
-5. **No feature sees the future** — [`test_features.py`](tests/test_features.py) proves it by
-   comparing a build at date T against a build from data truncated at T, and pins the feature
-   arithmetic (gaps, windows, growth, month counts) against hand-computed values.
+| Suite | What it pins |
+|---|---|
+| [`test_architecture.py`](tests/test_architecture.py) | No database, no ETL, no ingestion service, no API. **Hashes the source CSVs, runs the pipeline over them, and hashes them again** — the check that earns the read-only claim rather than asserting it. |
+| [`test_config.py`](tests/test_config.py) | Configuration resolves portably: relative paths anchor to the project root, absolute ones are honoured as an explicit escape hatch. |
+| [`test_csv_loader.py`](tests/test_csv_loader.py) | Dtypes, UTF-8 encoding, and the `Order ID` zero-padding that pandas destroys by default. |
+| [`test_validation.py`](tests/test_validation.py) | The validators **catch** bad data: a synthetic 4-table dataset with exactly one thing broken, asserting the specific named check fails. Without this, a validator that always returned `PASS` would look healthy. |
+| [`test_data_integrity.py`](tests/test_data_integrity.py) | The real CSVs satisfy every invariant. Complementary to the above; neither is sufficient alone. |
+| [`test_features.py`](tests/test_features.py) | Feature arithmetic against hand-computed values, and **no feature sees the future** — a build at date T compared against a build from data physically truncated at T. |
+| [`test_labels.py`](tests/test_labels.py) | Label semantics, censoring, and that an unfinished outcome window is `NA` rather than a silent `0`. |
+| [`test_models.py`](tests/test_models.py) | Split embargoes, risk banding, and the persistence feature contract. |
+| [`test_explainability.py`](tests/test_explainability.py) | SHAP folding, concept grouping, and that **every sentence quotes the value its own row reports**. |
+| [`test_retention.py`](tests/test_retention.py) | Projection caps, ROI guardrails, and the assumption/policy separation. |
+| [`test_recommendation_personas.py`](tests/test_recommendation_personas.py) | The nine customer types the brief names, each asserted on the business rule rather than an exact action string. |
+| [`test_end_to_end.py`](tests/test_end_to_end.py) | The real chain over the shipped data: probability range, scoring reproducibility, live TreeSHAP against the calibrated model, and the campaign economics reconciling with the rows beneath them. |
+| [`test_dashboard.py`](tests/test_dashboard.py) | Every page rendered in a real Streamlit runtime, the five-artefact join staying 1:1, and headline figures equal to the artefacts they came from. |
 
-Points 3 and 4 are complementary and neither is sufficient alone.
+Three of these earn their place by catching what unit tests structurally cannot. The architecture
+suite proves the CSVs are unmodified rather than assuming it. `test_end_to_end.py` runs TreeSHAP
+against the actual calibrated pipeline — the unit tests explain a hand-built result, so only this
+one proves the calibration wrapper is unwrappable at all. And `test_dashboard.py` renders each
+page, because a page can import cleanly and still fail at render time on a duplicate element key.
+
+### The pipeline is reproducible, and this was measured
+
+The whole workflow was re-run from scratch into empty directories — features, training, scoring,
+explanations, retention — and compared against the shipped artefacts:
+
+- every test-period metric matched **to the last decimal** (ROC-AUC 0.705646, PR-AUC 0.637983,
+  Brier 0.210472, ECE 0.083379);
+- all four output CSVs were **byte-identical**, including the 5,000-row explanations file;
+- the four source CSVs still hash to their original values, with their original timestamps.
+
+`RANDOM_SEED` is honoured throughout, so a rerun is a check rather than a new opinion.
 
 ---
 

@@ -6,8 +6,7 @@ code and any reviewer can check what was actually asked for against what was del
 ## Provenance and status
 
 Sections 0–2 are reproduced **as they were given to Claude Code** in the build session; Sections
-3–7 are transcribed from `Segmented Code Prompt.docx` at the workspace root. Sections 0–6 have
-been built; Section 7, the final test and quality review, has not been run as a discrete pass.
+3–7 are transcribed from `Segmented Code Prompt.docx` at the workspace root. All seven sections have been built.
 `code prompt.txt` and `code Prompt.docx` hold an earlier, unsegmented version of
 the same brief — see [the conflict note](#note-the-earlier-brief-contradicts-the-csv-first-rule)
 at the end, because it matters.
@@ -21,7 +20,7 @@ at the end, because it matters.
 | [4](#section-4--explainable-churn-prediction) | SHAP, per-customer churn drivers | **Delivered** |
 | [5](#section-5--revenue-risk-segmentation--recommendations) | Revenue at risk, segments, retention actions | **Delivered** |
 | [6](#section-6--streamlit-retention-dashboard) | Eight-page Streamlit dashboard | **Delivered** |
-| [7](#section-7--testing--finalization) | Full test and quality review | Not started |
+| [7](#section-7--testing--finalization) | Full test and quality review | **Delivered** |
 
 **Formatting note.** Wording is unchanged. The only edits are mechanical: `•` bullets became
 markdown `-` bullets, and indented blocks became fenced code blocks. Nothing has been summarised,
@@ -1027,7 +1026,7 @@ Every number must come from the CSV-based analytical pipeline.
 
 # Section 7 — Testing & Finalization
 
-> Not started.
+> **Delivered.**
 
 Perform a complete test and quality review of the CSV-based churn platform.
 
