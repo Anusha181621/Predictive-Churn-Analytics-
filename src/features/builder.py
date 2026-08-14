@@ -31,10 +31,12 @@ import pandas as pd
 from src.data.csv_loader import Datasets, load_all
 from src.features.affinity import build_affinity_features
 from src.features.context import FeatureContext, build_context
+from src.features.decay import build_decay_features
 from src.features.discount import build_discount_features
 from src.features.gaps import build_gap_features
 from src.features.lifecycle import build_lifecycle_features
 from src.features.params import FeatureParams
+from src.features.rate import build_rate_features
 from src.features.returns import build_return_features
 from src.features.rfm import build_rfm_features
 from src.features.seasonality import build_seasonality_features
@@ -52,6 +54,8 @@ FEATURE_GROUPS = (
     "identity",
     "rfm",
     "gaps",
+    "rate",
+    "decay",
     "trends",
     "lifecycle",
     "affinity",
@@ -219,6 +223,8 @@ def build_customer_features(
     identity = _identity_features(context)
     rfm = build_rfm_features(context)
     gaps = build_gap_features(context)
+    rate = build_rate_features(context)
+    decay = build_decay_features(context)
     trends = build_trend_features(context)
     lifecycle = build_lifecycle_features(context)
     affinity = build_affinity_features(context)
@@ -234,6 +240,8 @@ def build_customer_features(
         "identity": identity,
         "rfm": rfm,
         "gaps": gaps,
+        "rate": rate,
+        "decay": decay,
         "trends": trends,
         "lifecycle": lifecycle,
         "affinity": affinity,

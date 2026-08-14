@@ -126,6 +126,15 @@ def score_customers(
             "seasonally_explained_inactivity"
         ].to_numpy()
         predictions["Has purchase history"] = features["has_purchase_history"].to_numpy()
+        # The binary call at the threshold the model's reported precision, recall and accuracy were
+        # measured at -- taken from the metadata rather than re-derived here, so the confusion
+        # matrix in the metrics file and the flag in this CSV can never disagree. It is distinct
+        # from "Risk level", which bands the same probability for prioritisation rather than
+        # answering the yes/no question the model was scored on.
+        predictions["Predicted churn"] = (
+            predictions["Churn probability"] >= float(model.metadata.decision_threshold)
+        ).to_numpy()
+        predictions["Decision threshold"] = float(model.metadata.decision_threshold)
         predictions["Model"] = model.metadata.model_name
 
     logger.info(

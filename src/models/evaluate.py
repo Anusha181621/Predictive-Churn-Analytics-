@@ -43,12 +43,55 @@ from sklearn.metrics import (
 from src.utils.logging_config import get_logger
 
 __all__ = ["EvaluationResult", "evaluate_predictions", "expected_calibration_error",
-           "reliability_table", "top_decile_metrics"]
+           "reliability_table", "top_decile_metrics", "best_accuracy_threshold"]
 
 logger = get_logger(__name__)
 
 #: Default probability cut-off for the confusion-matrix style metrics.
 DEFAULT_THRESHOLD = 0.5
+
+
+def best_accuracy_threshold(
+    y_true: pd.Series | np.ndarray, y_prob: pd.Series | np.ndarray
+) -> tuple[float, float]:
+    """The probability cut-off that maximises accuracy, and the accuracy it achieves.
+
+    Returns ``(threshold, accuracy)``.
+
+    0.5 is the right cut-off only when the cost of a false positive equals that of a false negative
+    *and* the probabilities are perfectly calibrated to the population being scored. Neither holds
+    here: the churn base rate drifts from 25% to 47% across the timeline, so a model calibrated on
+    one period systematically under-calls churn on a later, churnier one -- which is precisely the
+    shape of the shipped model's errors, where recall sat at 0.32 against a precision of 0.69.
+
+    Every midpoint between adjacent distinct predicted probabilities is a candidate, since accuracy
+    is a step function of the threshold and can only change as the cut-off crosses a predicted
+    value. Ties are broken toward 0.5: on a few hundred rows a wide plateau of thresholds is
+    genuinely equal-scoring, and picking the middle of that plateau generalises better than picking
+    whichever end the sort happened to visit first.
+
+    **This must be fitted on held-out data that is not the test set.** Choosing it on the data it is
+    then scored on turns a reported accuracy into an upper bound achievable only in hindsight;
+    :func:`src.models.train.train_churn_model` fits it on the calibration period.
+    """
+    y_true = np.asarray(y_true).astype(int)
+    y_prob = np.asarray(y_prob, dtype="float64")
+    if len(y_true) == 0:
+        return DEFAULT_THRESHOLD, float("nan")
+
+    distinct = np.unique(y_prob)
+    if len(distinct) == 1:
+        return DEFAULT_THRESHOLD, float(((y_prob >= DEFAULT_THRESHOLD).astype(int) == y_true).mean())
+
+    midpoints = (distinct[:-1] + distinct[1:]) / 2.0
+    candidates = np.concatenate(([distinct[0] - 1e-6], midpoints, [distinct[-1] + 1e-6]))
+    # (n_candidates, n_rows) is fine at these sizes and avoids a Python loop over the grid.
+    accuracies = ((y_prob[None, :] >= candidates[:, None]).astype(int) == y_true[None, :]).mean(axis=1)
+
+    best = accuracies.max()
+    plateau = candidates[accuracies >= best - 1e-12]
+    chosen = float(plateau[np.argmin(np.abs(plateau - DEFAULT_THRESHOLD))])
+    return chosen, float(best)
 
 
 def expected_calibration_error(

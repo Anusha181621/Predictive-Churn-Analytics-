@@ -595,6 +595,191 @@ def test_in_season_customer_is_flagged(synthetic: Datasets) -> None:
 
 
 # ======================================================================================
+# 10b. FORWARD-WINDOW SEASONALITY -- the customer's season crossed with the outcome window
+# ======================================================================================
+
+
+def test_out_of_season_window_scores_below_one(built: pd.DataFrame) -> None:
+    """CUST0003 buys only in January, and the 180 days after 30 June contain no January."""
+    row = built.loc["CUST0003"]
+    assert row["seasonal_share_lift_in_horizon"] < 0.7
+    assert row["preferred_season_within_horizon"] == False    # noqa: E712
+    # Mid-January is about two thirds of a year ahead of the end of June.
+    assert row["days_until_preferred_season"] == pytest.approx(199, abs=5)
+
+
+def test_in_season_window_scores_above_one(synthetic: Datasets) -> None:
+    """Judged from 30 September, the same customer's January now falls inside the window."""
+    row = build_customer_features(synthetic, as_of_date="2025-09-30").features.set_index(
+        "customer_id"
+    ).loc["CUST0003"]
+    assert row["seasonal_share_lift_in_horizon"] > 1.3
+    assert row["preferred_season_within_horizon"] == True     # noqa: E712
+    assert row["days_until_preferred_season"] < 180
+
+
+def test_the_forward_window_follows_the_configured_horizon(synthetic: Datasets) -> None:
+    """A 90-day window from 30 September stops short of January; a 180-day one reaches it."""
+    def lift(horizon: int) -> pd.Series:
+        return build_customer_features(
+            synthetic,
+            as_of_date="2025-09-30",
+            params=FeatureParams(outcome_horizon_days=horizon),
+        ).features.set_index("customer_id").loc["CUST0003"]
+
+    short, long = lift(90), lift(180)
+    assert short["preferred_season_within_horizon"] == False   # noqa: E712
+    assert long["preferred_season_within_horizon"] == True     # noqa: E712
+    assert short["seasonal_share_lift_in_horizon"] < long["seasonal_share_lift_in_horizon"]
+
+
+def test_the_lift_reads_a_half_year_concentration_too(built: pd.DataFrame) -> None:
+    """The measure is not only for sharply seasonal customers.
+
+    CUST0001's six orders are spread across five different months -- which reads as *unseasonal* to
+    the concentration score -- but every one of them falls in the first half of the year. A July-to-
+    December window is therefore genuinely quiet for them, and the lift says so where
+    ``seasonal_customer_score`` cannot.
+    """
+    assert built.loc["CUST0001", "seasonal_purchase_concentration"] < 0.5
+    assert built.loc["CUST0001", "seasonal_share_lift_in_horizon"] == pytest.approx(0.5, abs=0.05)
+
+
+def test_a_customer_with_no_history_gets_the_uniform_profile(built: pd.DataFrame) -> None:
+    """With nothing observed, the month profile is flat and the lift is exactly neutral."""
+    assert built.loc["CUST0006", "seasonal_share_lift_in_horizon"] == pytest.approx(1.0)
+
+
+# ======================================================================================
+# 10c. LATENT PURCHASE RATE
+# ======================================================================================
+
+
+def test_rate_for_the_clockwork_customer(built: pd.DataFrame) -> None:
+    """CUST0001: 6 orders over 181 days of purchasing tenure, still buying at the as-of date."""
+    row = built.loc["CUST0001"]
+    assert row["purchasing_tenure_days"] == 181
+    assert row["lifetime_orders_per_year"] == pytest.approx(6 / (181 / 365.25), rel=1e-6)
+    # First order 1 Jan, last 31 May: a 151-day span inside a 181-day tenure.
+    assert row["active_span_days"] == 151
+    assert row["active_span_share_of_tenure"] == pytest.approx(151 / 181, rel=1e-6)
+    assert row["orders_per_active_year"] == pytest.approx(6 / (151 / 365.25), rel=1e-6)
+
+
+def test_the_shrunk_rate_matches_its_definition(built: pd.DataFrame) -> None:
+    """(orders + prior_orders) / (tenure_years + prior_years), with the shipped defaults."""
+    params = FeatureParams()
+    row = built.loc["CUST0001"]
+    expected = (6 + params.rate_prior_orders) / (181 / 365.25 + params.rate_prior_years)
+    assert row["shrunk_order_rate"] == pytest.approx(expected, rel=1e-6)
+    assert row["rate_implied_interval_days"] == pytest.approx(365.25 / expected, rel=1e-6)
+
+
+def test_the_raw_rate_is_withheld_for_a_very_new_customer(built: pd.DataFrame) -> None:
+    """CUST0002 is 11 days old: one order annualises to 33 a year, which is arithmetic, not signal."""
+    row = built.loc["CUST0002"]
+    assert row["purchasing_tenure_days"] == 11
+    assert pd.isna(row["lifetime_orders_per_year"])
+    # The shrunk estimate is still defined, and sits near the prior rather than at 33.
+    assert row["shrunk_order_rate"] < 5
+    # A single order is a point, not a span, so there is no while-active rate to report.
+    assert pd.isna(row["orders_per_active_year"])
+
+
+def test_active_span_share_separates_a_lapsed_customer_from_a_current_one(
+    built: pd.DataFrame,
+) -> None:
+    """The wall detector: CUST0005 stopped buying in the first 4% of their tenure."""
+    assert built.loc["CUST0005", "active_span_share_of_tenure"] < 0.05
+    assert built.loc["CUST0001", "active_span_share_of_tenure"] > 0.8
+
+
+def test_silence_probabilities_follow_the_arrival_model(built: pd.DataFrame) -> None:
+    """missed = rate x recency / 365.25, and survival = exp(-missed)."""
+    row = built.loc["CUST0001"]
+    expected_missed = row["shrunk_order_rate"] * row["recency_days"] / 365.25
+    assert row["missed_expected_orders"] == pytest.approx(expected_missed, rel=1e-6)
+    assert row["silence_survival_probability"] == pytest.approx(np.exp(-expected_missed), rel=1e-6)
+    # The dormant customer has been quiet for 871 days. Their estimated rate is only ~1.2 orders a
+    # year, so that silence is about three missed orders -- unlikely rather than impossible, which
+    # is the honest reading for a slow buyer and exactly why the measure is scaled by their own
+    # rate instead of by a flat recency cut-off.
+    dormant = built.loc["CUST0005"]
+    assert dormant["missed_expected_orders"] > 2.5
+    assert dormant["silence_survival_probability"] < 0.1
+    assert dormant["silence_survival_probability"] < row["silence_survival_probability"]
+
+
+def test_implied_repurchase_probability_is_a_probability(built: pd.DataFrame) -> None:
+    implied = built["implied_repurchase_probability"]
+    assert implied.between(0.0, 1.0).all()
+    expected = 1 - np.exp(-built["expected_orders_in_horizon"])
+    pd.testing.assert_series_equal(implied, expected, check_names=False)
+    # The clockwork buyer is far likelier to come back within 180 days than the once-a-year one.
+    assert built.loc["CUST0001", "implied_repurchase_probability"] > built.loc[
+        "CUST0003", "implied_repurchase_probability"
+    ]
+
+
+# ======================================================================================
+# 10d. INTENSITY DECAY
+# ======================================================================================
+
+
+def test_tenure_halves_for_the_clockwork_customer(built: pd.DataFrame) -> None:
+    """Tenure runs 1 Jan to 30 June, so the midpoint is 1 April: four orders before, two after."""
+    row = built.loc["CUST0001"]
+    assert row["orders_first_half_tenure"] == 4
+    assert row["orders_second_half_tenure"] == 2
+    assert row["tenure_half_order_ratio"] == pytest.approx(3 / 5)
+    assert row["second_half_order_share"] == pytest.approx(2 / 6)
+
+
+def test_tenure_halves_for_a_customer_who_stopped(built: pd.DataFrame) -> None:
+    """CUST0005 bought twice in early 2023 and never again: nothing in the second half."""
+    row = built.loc["CUST0005"]
+    assert row["orders_first_half_tenure"] == 2
+    assert row["orders_second_half_tenure"] == 0
+    assert row["second_half_order_share"] == 0.0
+    assert row["recency_share_of_tenure"] > 0.9
+
+
+def test_order_shares_are_lifetime_normalised(built: pd.DataFrame) -> None:
+    """The window is half-open, so the order exactly 180 days back falls outside it."""
+    # CUST0001's 1 January order sits on the left edge of (as_of - 180, as_of].
+    assert built.loc["CUST0001", "order_share_last_180d"] == pytest.approx(5 / 6)
+    assert built.loc["CUST0001", "order_share_last_365d"] == pytest.approx(1.0)
+    assert built.loc["CUST0005", "order_share_last_180d"] == 0.0
+
+
+def test_the_decay_slope_is_negative_for_a_fading_customer(built: pd.DataFrame) -> None:
+    """CUST0005's orders all sit in the first of many quarters, so the trend points down."""
+    row = built.loc["CUST0005"]
+    assert row["decay_buckets"] >= 3
+    assert row["order_intensity_slope"] < 0
+
+
+def test_the_decay_slope_is_withheld_without_enough_buckets(built: pd.DataFrame) -> None:
+    """CUST0002 has 11 days of history: one quarter, and no trend through a single point."""
+    row = built.loc["CUST0002"]
+    assert row["decay_buckets"] < FeatureParams().min_buckets_for_decay
+    assert pd.isna(row["order_intensity_slope"])
+
+
+def test_empty_buckets_count_as_zeros_not_gaps(synthetic: Datasets) -> None:
+    """A quarter with no orders is evidence of decay, so it must not be dropped from the fit.
+
+    Judged from mid-2025, CUST0005's two orders sit in one early quarter followed by nine silent
+    ones. Fitting only the quarters that contain orders would see a single point and no trend.
+    """
+    row = build_customer_features(synthetic, as_of_date=AS_OF).features.set_index(
+        "customer_id"
+    ).loc["CUST0005"]
+    assert row["decay_buckets"] >= 9
+    assert row["order_intensity_slope"] < 0
+
+
+# ======================================================================================
 # 11. VALUE AND SEGMENTS
 # ======================================================================================
 

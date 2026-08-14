@@ -121,6 +121,50 @@ def _circular_distance_days(day_a: pd.Series, day_b: float) -> pd.Series:
     return np.minimum(raw, DAYS_PER_YEAR - raw)
 
 
+def _horizon_month_coverage(as_of: pd.Timestamp, horizon_days: int) -> pd.Series:
+    """What fraction of each calendar month the outcome window ``(as_of, as_of + horizon]`` covers.
+
+    Indexed 1-12 and summing to roughly ``horizon_days / 30.4``. Computed day by day and divided by
+    the true length of each month occurrence, so February and a leap year are handled without a
+    special case, and a window spanning the same month in two years accumulates both.
+    """
+    days = pd.date_range(
+        start=as_of + pd.Timedelta(days=1), periods=int(horizon_days), freq="D"
+    )
+    if len(days) == 0:  # pragma: no cover - horizon is validated positive
+        return pd.Series(0.0, index=pd.RangeIndex(1, 13))
+    frame = pd.DataFrame({"month": days.month, "length": days.days_in_month.astype("float64")})
+    coverage = frame.assign(weight=1.0 / frame["length"]).groupby("month")["weight"].sum()
+    return coverage.reindex(range(1, 13), fill_value=0.0)
+
+
+def _month_shares(orders: pd.DataFrame, index: pd.Index, alpha: float = 0.5) -> pd.DataFrame:
+    """Each customer's share of lifetime orders by calendar month, Laplace-smoothed.
+
+    Smoothing is not cosmetic here. Most customers have single-digit order counts, so an unsmoothed
+    histogram reads "zero probability of ever buying in March" from three orders that happened to
+    miss March. ``alpha`` of half an order per month keeps the profile honest about how thin the
+    evidence is: at 3 orders the profile is barely distinguishable from uniform, and it only
+    sharpens once the customer has supplied enough orders to justify it.
+    """
+    months = pd.RangeIndex(1, 13)
+    if orders.empty:
+        return pd.DataFrame(1.0 / 12.0, index=index, columns=months)
+
+    counts = (
+        orders.assign(month=orders["purchase_date"].dt.month)
+        .groupby(["customer_id", "month"], observed=True)
+        .size()
+        .unstack("month")
+        .reindex(columns=months, fill_value=0)
+        .reindex(index)
+        .fillna(0.0)
+        .astype("float64")
+    )
+    smoothed = counts + alpha
+    return smoothed.div(smoothed.sum(axis=1), axis=0)
+
+
 def build_seasonality_features(context: FeatureContext) -> pd.DataFrame:
     """One row per customer: seasonal concentration, preferred period, and in-season status."""
     features = context.empty_frame()
@@ -195,6 +239,43 @@ def build_seasonality_features(context: FeatureContext) -> pd.DataFrame:
         & ~features["in_preferred_season"]
         & ~features["missed_full_season"]
     )
+
+    # --- crossing the customer's season with the window they are being judged on ---
+    #
+    # Everything above describes where the customer's season sits. None of it says whether that
+    # season falls inside the *outcome window*, which is the only thing the label depends on. A
+    # customer who buys every spring is not "at risk" on 31 March and near-certain to be silent
+    # from 30 June to 31 December -- same customer, same seasonality score, opposite labels. That
+    # distinction is invisible to every feature above and is what these three add.
+    #
+    # On period leakage: the window offsets are the same for every row in a snapshot, but these
+    # features multiply them by the customer's *own* month profile, so they vary across customers
+    # within a snapshot and do not fingerprint the period the way a bare `as_of_month` would. See
+    # the contract in src/models/dataset.py.
+    horizon = int(params.outcome_horizon_days)
+    coverage = _horizon_month_coverage(context.as_of, horizon)
+    shares = _month_shares(orders, features.index)
+
+    # Sum over months of (this customer's share of annual orders in month m) x (fraction of month m
+    # the window covers). Reads as: the share of a typical year's buying that falls in this window.
+    expected_share = shares.mul(coverage, axis=1).sum(axis=1)
+    features["expected_seasonal_share_in_horizon"] = expected_share
+
+    # The same figure against what a customer with no seasonality at all would show, so 1.0 means
+    # "this window is unremarkable for them", 2.0 means "this window is twice their normal", and
+    # 0.3 means "they are quiet at this time of year". The ratio is the period-portable form: the
+    # uniform baseline it divides by carries the whole snapshot-constant part.
+    uniform_baseline = float(coverage.sum()) / 12.0
+    features["seasonal_share_lift_in_horizon"] = (
+        expected_share / uniform_baseline if uniform_baseline > 0 else np.nan
+    )
+
+    # Forward distance to the middle of their season, where the features above only have the
+    # symmetric distance. Direction matters: 40 days *past* the peak and 40 days *before* it mean
+    # opposite things for a window that opens today.
+    days_forward = (features["preferred_day_of_year"] - as_of_day) % DAYS_PER_YEAR
+    features["days_until_preferred_season"] = days_forward
+    features["preferred_season_within_horizon"] = days_forward.le(float(horizon)).fillna(False)
 
     # Deliberately NOT rounded: this is the modelling table, and truncating ratios to a
     # few decimals would discard real signal. Presentation rounding happens at CSV-write

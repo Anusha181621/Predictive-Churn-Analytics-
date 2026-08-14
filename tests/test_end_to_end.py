@@ -231,6 +231,13 @@ def test_folding_preserves_the_total_contribution(data, model) -> None:
 
     Summing the expanded contributions and the folded ones must give the same total per customer;
     if it did not, the aggregation would be inventing or destroying explanation.
+
+    Tolerance is set for single precision, not double. Folding is exact arithmetic -- it only adds
+    columns together -- so the residual here is entirely the precision of the SHAP values being
+    added. XGBoost's TreeSHAP returns float32, which carries about seven significant digits, so
+    summing 80 of them accumulates error around 1e-7 in absolute terms. A 1e-9 tolerance would not
+    be testing the folding at all; it would be asserting which model family the selection stage
+    happened to pick, and would fail the moment it picked a different one.
     """
     from src.features import build_customer_features
 
@@ -239,8 +246,8 @@ def test_folding_preserves_the_total_contribution(data, model) -> None:
     np.testing.assert_allclose(
         result.contributions.sum(axis=1).to_numpy(),
         result.expanded.sum(axis=1).to_numpy(),
-        rtol=1e-9,
-        atol=1e-9,
+        rtol=1e-5,
+        atol=1e-6,
     )
 
 

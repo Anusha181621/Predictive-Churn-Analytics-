@@ -42,7 +42,7 @@ from src.data.csv_loader import Datasets, load_all
 from src.features.params import FeatureParams
 from src.models.candidates import CandidateSpec, available_candidates, candidate_specs
 from src.models.dataset import TARGET_COLUMN, ModellingPanel, build_panel, monthly_as_of_grid
-from src.models.evaluate import EvaluationResult, evaluate_predictions
+from src.models.evaluate import EvaluationResult, best_accuracy_threshold, evaluate_predictions
 from src.models.labels import LabelMode, LabelParams
 from src.models.preprocessing import build_preprocessor, feature_matrix, split_feature_columns
 from src.models.registry import ModelMetadata, save_model, utc_timestamp
@@ -58,6 +58,15 @@ SELECTION_METRIC = "pr_auc"
 
 #: Features that barely move for a given customer, so across repeated snapshots they identify the
 #: individual rather than describe behaviour. See the module docstring.
+#:
+#: ``acquisition_channel`` was re-tested on the inner validation split when the rate features were
+#: added, on the theory that the channel a customer arrived through plausibly *causes* a different
+#: repeat rate and so is not merely a fingerprint. The measurement did not support keeping it: with
+#: it, LightGBM's selection-validation PR-AUC fell from 0.5698 to 0.5518 while its train PR-AUC rose
+#: from 0.636 to 0.868 -- the model spent the extra column on memorising individuals, exactly the
+#: failure mode this set exists to prevent. It helped the linear model slightly (0.5104 to 0.5205),
+#: which is consistent with there being a small real effect that a tree cannot use without also
+#: using the column as an identifier. It stays excluded.
 IDENTITY_FEATURES: frozenset[str] = frozenset(
     {
         "age",
@@ -139,6 +148,12 @@ class TrainingResult:
     baselines: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
     top_features: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
     notes: list[str] = field(default_factory=list)
+    #: Probability cut-off chosen on the calibration period; also stored on the metadata.
+    decision_threshold: float = 0.5
+    #: The hyperparameter search, when one was run.
+    tuning: Any = None
+    #: Permutation ranking behind the feature trim, when one was applied.
+    feature_ranking: pd.DataFrame = field(repr=False, default_factory=pd.DataFrame)
 
     def leaderboard(self) -> pd.DataFrame:
         """Candidates ranked by the selection metric on the inner validation split."""
@@ -449,6 +464,69 @@ def _calibrate(
     return best[1], best[0], best[3]
 
 
+def _select_features(
+    outcome: CandidateOutcome,
+    split: TimeSplit,
+    columns: Sequence[str],
+    max_features: int,
+    seed: int,
+) -> tuple[list[str], pd.DataFrame]:
+    """Keep the ``max_features`` most useful columns, ranked on the inner validation split.
+
+    The feature table carries ~155 columns describing a few hundred distinct customers, and the
+    selection leaderboard shows what that costs: train PR-AUC 0.86 against 0.56 on validation. Most
+    of those columns are near-duplicates of each other -- a dozen ways of saying "bought recently"
+    -- and each one is another chance for the model to fit noise.
+
+    Ranked by permutation importance on ``selection_validation`` rather than on the training data,
+    because a column's importance *to a model that has overfit it* is exactly the wrong signal:
+    it would preserve the columns responsible for the gap. Validation is also the only split that
+    may be read here -- ranking on calibration would contaminate the threshold and probability
+    mapping that are fitted there later, and ranking on test needs no explanation.
+
+    Returns ``(kept columns, the full ranking)``.
+    """
+    from sklearn.inspection import permutation_importance
+
+    x = _matrix(split.selection_validation, columns)
+    y = split.selection_validation[TARGET_COLUMN].astype(int)
+    result = permutation_importance(
+        outcome.pipeline,
+        x,
+        y,
+        scoring="average_precision",
+        # Fewer repeats than the reporting-time importance: this ranking only has to order the
+        # columns, not produce a stable number to publish.
+        n_repeats=3,
+        random_state=seed,
+        n_jobs=-1,
+    )
+    ranking = (
+        pd.DataFrame(
+            {
+                "feature": list(x.columns),
+                "importance": result.importances_mean,
+                "importance_std": result.importances_std,
+            }
+        )
+        .sort_values("importance", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    kept = ranking.head(max_features)["feature"].tolist()
+    # Preserve the caller's deterministic column order rather than importance order, so the saved
+    # feature contract does not reshuffle between runs that rank two tied columns differently.
+    ordered = [c for c in columns if c in set(kept)]
+    logger.info(
+        "Feature selection: kept %d of %d columns (top importance %.5f, cut at %.5f)",
+        len(ordered),
+        len(columns),
+        float(ranking["importance"].iloc[0]) if len(ranking) else float("nan"),
+        float(ranking["importance"].iloc[len(kept) - 1]) if len(kept) else float("nan"),
+    )
+    return ordered, ranking
+
+
 def _feature_importance(
     pipeline: Any, frame: pd.DataFrame, columns: Sequence[str], seed: int
 ) -> pd.DataFrame:
@@ -497,16 +575,44 @@ def train_churn_model(
     test_periods: int = 1,
     calibration_periods: int = 1,
     selection_validation_periods: int = 3,
+    max_features: int | None = None,
+    tune: bool = False,
+    tuning_iterations: int = 40,
     model_dir: str | None = None,
     save: bool = True,
 ) -> TrainingResult:
-    """Train, select, refit, calibrate and persist the churn model."""
+    """Train, select, refit, calibrate and persist the churn model.
+
+    Parameters
+    ----------
+    max_features:
+        Trim the feature matrix to this many columns, ranked by permutation importance on the inner
+        validation split, then re-run selection on the trimmed set. ``None`` keeps every column.
+    tune:
+        Random-search the winning family's hyperparameters against the inner validation split
+        before the refit. Off by default because it multiplies training time by roughly
+        ``tuning_iterations``.
+    tuning_iterations:
+        Number of sampled configurations when ``tune`` is set.
+    """
     settings = settings or get_settings()
     data = data if data is not None else load_all()
     label_params = label_params or LabelParams(
         horizon_days=settings.churn_inactivity_days, mode=LabelMode.FIXED
     )
-    feature_params = feature_params or FeatureParams()
+    # The rate and seasonality features project a customer's history onto the outcome window, so
+    # the window they use has to be the one the label actually measures. Deriving it here rather
+    # than leaving both at their defaults is what keeps a `--horizon 90` run coherent: otherwise
+    # the label would ask about 90 days while `implied_repurchase_probability` answered for 180.
+    if feature_params is None:
+        feature_params = FeatureParams(outcome_horizon_days=int(label_params.horizon_days))
+    elif feature_params.outcome_horizon_days != int(label_params.horizon_days):
+        logger.warning(
+            "feature_params.outcome_horizon_days=%d does not match the %d-day label horizon; the "
+            "forward-window features will describe a different window from the target",
+            feature_params.outcome_horizon_days,
+            int(label_params.horizon_days),
+        )
     seed = settings.random_seed
     notes: list[str] = []
 
@@ -570,6 +676,88 @@ def train_churn_model(
 
     ranked = sorted(outcomes, key=lambda o: o.validation_eval.metrics[SELECTION_METRIC], reverse=True)
     selected = ranked[0]
+
+    # --- 1b. optionally trim the feature matrix and re-select on the trimmed set ---
+    #
+    # Re-running selection rather than reusing the previous winner: a smaller matrix changes the
+    # bias/variance trade-off, and the family that wins on 155 columns need not win on 40.
+    feature_ranking = pd.DataFrame()
+    if max_features is not None and max_features < len(columns):
+        columns, feature_ranking = _select_features(
+            selected, split, columns, int(max_features), seed
+        )
+        numeric = [c for c in numeric if c in set(columns)]
+        categorical = [c for c in categorical if c in set(columns)]
+        notes.append(
+            f"The feature matrix was trimmed to the {len(columns)} columns with the highest "
+            "permutation importance on the embargoed inner validation split, from "
+            f"{len(feature_ranking)}. With a few hundred distinct customers behind the panel, most "
+            "of the discarded columns restate one another and each one is another opportunity to "
+            "fit noise."
+        )
+        outcomes, _ = _select(split, columns, seed)
+        ranked = sorted(
+            outcomes, key=lambda o: o.validation_eval.metrics[SELECTION_METRIC], reverse=True
+        )
+        selected = ranked[0]
+
+    # --- 1c. optionally tune the winner's hyperparameters, still on the inner split ---
+    tuning_result = None
+    if tune:
+        from src.models.tuning import search_hyperparameters
+
+        tuning_result = search_hyperparameters(
+            selected.spec,
+            split,
+            columns,
+            seed=seed,
+            iterations=int(tuning_iterations),
+            metric=SELECTION_METRIC,
+        )
+        if tuning_result.best_params:
+            base_factory = selected.spec.factory
+            overrides = dict(tuning_result.best_params)
+            tuned_spec = CandidateSpec(
+                name=selected.spec.name,
+                factory=lambda s, _f=base_factory, _o=overrides: _override(_f(s), _o),
+                impute_and_scale=selected.spec.impute_and_scale,
+                supports_early_stopping=selected.spec.supports_early_stopping,
+                notes=selected.spec.notes,
+            )
+            pipeline, best_iteration = _fit(
+                tuned_spec, split.selection_train, split.selection_validation, columns, seed
+            )
+            selected = CandidateOutcome(
+                spec=tuned_spec,
+                pipeline=pipeline,
+                train_eval=evaluate_predictions(
+                    split.selection_train[TARGET_COLUMN].astype(int),
+                    pipeline.predict_proba(_matrix(split.selection_train, columns))[:, 1],
+                    model_name=tuned_spec.name,
+                    dataset="selection_train",
+                ),
+                validation_eval=evaluate_predictions(
+                    split.selection_validation[TARGET_COLUMN].astype(int),
+                    pipeline.predict_proba(_matrix(split.selection_validation, columns))[:, 1],
+                    model_name=tuned_spec.name,
+                    dataset="selection_validation",
+                ),
+                best_iteration=best_iteration,
+            )
+            notes.append(
+                f"{tuned_spec.name} hyperparameters were random-searched over "
+                f"{len(tuning_result.trials)} configurations against the embargoed inner "
+                f"validation split, improving selection {SELECTION_METRIC} from "
+                f"{tuning_result.baseline_score:.4f} to {tuning_result.best_score:.4f}. The search "
+                "never sees the calibration or test periods."
+            )
+        else:
+            notes.append(
+                f"A {tuning_iterations}-trial hyperparameter search found nothing better than the "
+                f"hand-set defaults (selection {SELECTION_METRIC} "
+                f"{tuning_result.baseline_score:.4f}); the defaults were kept."
+            )
+
     rationale = (
         f"Highest selection-validation {SELECTION_METRIC} "
         f"({selected.validation_eval.metrics[SELECTION_METRIC]:.4f})"
@@ -636,6 +824,31 @@ def train_churn_model(
             f"{', '.join(d.date().isoformat() for d in plan.calibration)} period."
         )
 
+    # --- 3b. choose the decision threshold, on calibration data only ---
+    #
+    # 0.5 is not a neutral choice on a problem whose base rate drifts from 25% to 47% across the
+    # timeline: a model whose probabilities are honest for the period it was calibrated on will
+    # systematically under-call churn on a churnier one. Picking the cut-off on the held-out
+    # calibration period fixes that without ever consulting the test period -- which is the whole
+    # point, since a threshold chosen on test would make the reported accuracy a hindsight number.
+    calibration_probability = final_pipeline.predict_proba(_matrix(split.calibration, columns))[:, 1]
+    decision_threshold, calibration_accuracy = best_accuracy_threshold(
+        split.calibration[TARGET_COLUMN].astype(int), calibration_probability
+    )
+    logger.info(
+        "Decision threshold %.4f chosen on the calibration period (accuracy there %.4f versus "
+        "%.4f at 0.5)",
+        decision_threshold,
+        calibration_accuracy,
+        calibration_eval.metrics["accuracy"],
+    )
+    notes.append(
+        f"The decision threshold was set to {decision_threshold:.4f} by maximising accuracy on the "
+        f"held-out calibration period, not at the conventional 0.5. Both readings are reported: "
+        "accuracy at a fixed 0.5 is comparable with earlier runs, accuracy at the tuned threshold "
+        "is what the model actually achieves in use. The threshold never saw the test period."
+    )
+
     # --- 4. the single look at the test period ---
     x_test = _matrix(split.test, columns)
     y_test = split.test[TARGET_COLUMN].astype(int)
@@ -645,15 +858,36 @@ def train_churn_model(
         test_prob,
         model_name=selected.spec.name,
         dataset="test",
+        threshold=decision_threshold,
         value=split.test.get("annualized_revenue"),
         high_value=split.test["customer_value_segment"].eq("High Value")
         if "customer_value_segment" in split.test
         else None,
     )
+    # The same probabilities read at the conventional cut-off, so the headline stays comparable
+    # with every run recorded before the threshold became tunable.
+    test_at_half = evaluate_predictions(
+        y_test, test_prob, model_name=selected.spec.name, dataset="test_at_0.5"
+    )
+    test_eval.metrics["accuracy_at_0.5"] = test_at_half.metrics["accuracy"]
+    test_eval.metrics["f1_at_0.5"] = test_at_half.metrics["f1"]
+    # What predicting the majority class every time would score. Accuracy on an imbalanced problem
+    # is mostly a statement about the base rate, so quoting it without this comparison invites the
+    # reader to credit the model for the class split.
+    test_eval.metrics["majority_class_accuracy"] = float(
+        max(test_eval.base_rate, 1.0 - test_eval.base_rate)
+    )
+    test_eval.metrics["accuracy_lift_over_majority"] = (
+        test_eval.metrics["accuracy"] - test_eval.metrics["majority_class_accuracy"]
+    )
     logger.info(
-        "TEST: PR-AUC %.4f | ROC-AUC %.4f | F1 %.4f | Brier %.4f | ECE %.4f | lift@10%% %.2fx",
+        "TEST: PR-AUC %.4f | ROC-AUC %.4f | accuracy %.4f (%.4f at 0.5, %.4f predicting the "
+        "majority) | F1 %.4f | Brier %.4f | ECE %.4f | lift@10%% %.2fx",
         test_eval.metrics["pr_auc"],
         test_eval.metrics["roc_auc"],
+        test_eval.metrics["accuracy"],
+        test_eval.metrics["accuracy_at_0.5"],
+        test_eval.metrics["majority_class_accuracy"],
         test_eval.metrics["f1"],
         test_eval.metrics["brier"],
         test_eval.metrics["ece"],
@@ -724,12 +958,22 @@ def train_churn_model(
         train_churn_rate=base_rates["fit"],
         calibration=calibration_method,
         random_seed=seed,
+        decision_threshold=float(decision_threshold),
         metrics={
             "calibration_period": calibration_eval.as_dict(),
             "test": test_eval.as_dict(),
             "split": split.summary(),
             "base_rates": base_rates,
             "single_feature_baselines": baselines.to_dict(orient="records"),
+            "decision_threshold": {
+                "value": round(float(decision_threshold), 6),
+                "fitted_on": "calibration",
+                "calibration_accuracy": round(float(calibration_accuracy), 6),
+                "calibration_accuracy_at_0.5": round(
+                    float(calibration_eval.metrics["accuracy"]), 6
+                ),
+            },
+            "tuning": tuning_result.as_dict() if tuning_result is not None else None,
         },
         candidate_scores=[o.as_dict() for o in outcomes],
         selection_metric=SELECTION_METRIC,
@@ -754,7 +998,19 @@ def train_churn_model(
         baselines=baselines,
         top_features=importance,
         notes=notes,
+        decision_threshold=float(decision_threshold),
+        tuning=tuning_result,
+        feature_ranking=feature_ranking,
     )
+
+
+def _override(estimator: Any, params: dict[str, Any]) -> Any:
+    """Apply searched hyperparameters, ignoring any the estimator does not accept."""
+    accepted = set(estimator.get_params().keys())
+    usable = {k: v for k, v in params.items() if k in accepted}
+    if usable:
+        estimator.set_params(**usable)
+    return estimator
 
 
 def _pin_trees(estimator: Any, n_trees: int) -> Any:

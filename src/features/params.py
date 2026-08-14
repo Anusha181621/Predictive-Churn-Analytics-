@@ -44,6 +44,41 @@ class FeatureParams:
     #: where no gap can be measured.
     default_expected_interval_days: int = 90
 
+    # --- the outcome window the model is asked about ---
+    #: Length of the forward window the churn label covers. The rate and seasonality features
+    #: project a customer's history *onto this window* -- "how many orders should they place in
+    #: the next N days", "does their buying season fall inside it" -- so the number has to match
+    #: the label horizon or the projection answers a question nobody asked. Callers that change
+    #: `LabelParams.horizon_days` must change this with it; `train_churn_model` does so
+    #: automatically.
+    outcome_horizon_days: int = 180
+
+    # --- latent purchase-rate estimation ---
+    #: Empirical-Bayes prior for the per-customer order rate, expressed as a pseudo-observation:
+    #: `prior_orders` orders seen over `prior_years` of pseudo-tenure. Shrinkage matters because
+    #: the raw rate `orders / tenure_years` is wildly unstable for the short-tenure, low-count
+    #: customers who carry most of the prediction error -- one order in three weeks reads as
+    #: 17 orders/year. Deliberately a fixed constant rather than a cohort mean: a cohort mean is
+    #: recomputed at every as-of date and would fingerprint the snapshot, exactly the failure
+    #: `src.models.preprocessing` documents for `high_value_threshold`.
+    rate_prior_orders: float = 2.0
+    rate_prior_years: float = 0.75
+
+    #: Minimum tenure before an unshrunk annualised rate is reported at all. Below this the raw
+    #: figure is arithmetic noise, so `lifetime_orders_per_year` is null and only the shrunk
+    #: estimate is offered.
+    min_tenure_days_for_rate: int = 60
+
+    # --- intensity decay ---
+    #: Width of the buckets the order-intensity trend is regressed over. 90 days is a quarter,
+    #: which is long enough that a typical customer has a non-zero count in most buckets and
+    #: short enough to resolve a decline within a year of history.
+    decay_bucket_days: int = 90
+
+    #: Minimum buckets of history before a decay slope is fitted. A slope through two points is
+    #: not evidence of a trend.
+    min_buckets_for_decay: int = 3
+
     # --- behavioural segments ---
     #: Orders in the last 365 days at or above which a customer counts as a frequent buyer.
     frequent_orders_365d: int = 6
@@ -100,3 +135,14 @@ class FeatureParams:
             raise ValueError("dormant_gap_multiple must be positive")
         if self.declining_revenue_growth >= 0:
             raise ValueError("declining_revenue_growth describes a decline, so it must be < 0")
+        if self.outcome_horizon_days <= 0:
+            raise ValueError("outcome_horizon_days must be positive")
+        if self.rate_prior_orders < 0 or self.rate_prior_years <= 0:
+            raise ValueError(
+                "the rate prior needs a non-negative pseudo-count over a positive pseudo-tenure, "
+                f"got {self.rate_prior_orders} orders over {self.rate_prior_years} years"
+            )
+        if self.decay_bucket_days <= 0:
+            raise ValueError("decay_bucket_days must be positive")
+        if self.min_buckets_for_decay < 3:
+            raise ValueError("min_buckets_for_decay must be at least 3 to fit a meaningful slope")

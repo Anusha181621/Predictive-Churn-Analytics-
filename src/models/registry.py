@@ -22,6 +22,7 @@ from typing import Any
 import joblib
 import pandas as pd
 
+from src.models.evaluate import DEFAULT_THRESHOLD
 from src.utils.logging_config import get_logger
 from src.utils.paths import ensure_dir
 
@@ -58,6 +59,12 @@ class ModelMetadata:
     train_churn_rate: float
     calibration: str
     random_seed: int
+    #: Probability cut-off for the binary churn call, chosen by maximising accuracy on the
+    #: calibration period. Persisted because scoring has to use the same cut-off the reported
+    #: metrics were computed at -- a threshold that lives only in the training run and not in the
+    #: artefact would silently revert to 0.5 at prediction time. Defaulted so metadata written
+    #: before this field existed still loads.
+    decision_threshold: float = DEFAULT_THRESHOLD
     metrics: dict[str, Any] = field(default_factory=dict)
     candidate_scores: list[dict[str, Any]] = field(default_factory=list)
     selection_metric: str = "pr_auc"
@@ -81,6 +88,17 @@ class SavedModel:
         matrix = self.align(frame)
         probabilities = self.pipeline.predict_proba(matrix)[:, 1]
         return pd.Series(probabilities, index=frame.index, name="churn_probability")
+
+    def predict_churn(self, frame: pd.DataFrame) -> pd.Series:
+        """The binary churn call, at the threshold this model was evaluated at.
+
+        Callers must not re-derive a cut-off of their own: the reported precision, recall and
+        accuracy all describe :attr:`ModelMetadata.decision_threshold`, so a scoring path that
+        quietly used 0.5 instead would produce a different confusion matrix from the one published
+        alongside it.
+        """
+        threshold = float(self.metadata.decision_threshold)
+        return (self.predict_proba(frame) >= threshold).rename("predicted_churn")
 
     def align(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Return ``frame`` restricted and reordered to the stored feature columns.

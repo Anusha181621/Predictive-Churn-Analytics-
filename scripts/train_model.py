@@ -90,6 +90,13 @@ def _report(result: TrainingResult, label_comparison: dict | None) -> str:
         f"  ROC-AUC   {m['roc_auc']:.4f}      PR-AUC    {m['pr_auc']:.4f}",
         f"  Precision {m['precision']:.4f}      Recall    {m['recall']:.4f}      F1 {m['f1']:.4f}",
         "",
+        "  Accuracy:",
+        f"    at the tuned threshold {result.decision_threshold:.3f}   {m['accuracy']:.4f}",
+        f"    at the conventional 0.5                {m['accuracy_at_0.5']:.4f}",
+        f"    predicting the majority class always   {m['majority_class_accuracy']:.4f}"
+        f"   <- the number to beat",
+        f"    lift over that baseline                {m['accuracy_lift_over_majority']:+.4f}",
+        "",
         "  Calibration:",
         f"    Brier {m['brier']:.4f}   ECE {m['ece']:.4f}   "
         f"mean predicted {m['mean_predicted']:.3f} vs observed {m['mean_observed']:.3f} "
@@ -104,8 +111,8 @@ def _report(result: TrainingResult, label_comparison: dict | None) -> str:
     confusion = result.test_eval.confusion
     lines += [
         "",
-        f"  Confusion matrix @ 0.5: TN {confusion['tn']}  FP {confusion['fp']}  "
-        f"FN {confusion['fn']}  TP {confusion['tp']}",
+        f"  Confusion matrix @ {result.decision_threshold:.3f}: TN {confusion['tn']}  "
+        f"FP {confusion['fp']}  FN {confusion['fn']}  TP {confusion['tp']}",
         "",
         "  Reliability (predicted vs observed churn rate per probability decile):",
     ]
@@ -177,6 +184,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--test-periods", type=int, default=1)
     parser.add_argument("--calibration-periods", type=int, default=1)
     parser.add_argument("--selection-validation-periods", type=int, default=3)
+    parser.add_argument(
+        "--max-features",
+        type=int,
+        default=None,
+        help="Trim the feature matrix to the N most important columns, ranked on the embargoed "
+        "inner validation split. Default: keep every column.",
+    )
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        help="Random-search the selected model's hyperparameters against the inner validation "
+        "split before refitting. Slow: multiplies training time by roughly --tuning-iterations.",
+    )
+    parser.add_argument("--tuning-iterations", type=int, default=40)
     parser.add_argument("--model-dir", default=None, help="Where to save the model.")
     parser.add_argument("--no-save", action="store_true", help="Train but do not persist.")
     parser.add_argument("--quiet", action="store_true", help="Suppress the console report.")
@@ -214,6 +235,9 @@ def main(argv: list[str] | None = None) -> int:
         test_periods=args.test_periods,
         calibration_periods=args.calibration_periods,
         selection_validation_periods=args.selection_validation_periods,
+        max_features=args.max_features,
+        tune=args.tune,
+        tuning_iterations=args.tuning_iterations,
         model_dir=args.model_dir,
         save=not args.no_save,
     )
