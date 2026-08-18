@@ -463,6 +463,18 @@ class NarrativeBuilder:
         phrase = VOCABULARY.get(feature)
         effect = "raising churn risk" if contribution > 0 else "lowering churn risk"
 
+        # The feature has no value for this customer -- a one-time buyer has no purchase gap, so
+        # no regularity, no gap ratio and no intensity slope. It still reaches this method as a
+        # ranked driver because the model imputes the value and flags the gap, and the flag
+        # carries real weight. That is worth saying plainly: the *absence* of history is the
+        # signal. Saying "order timing regularity is not available" instead reports a data
+        # problem, when what happened is that the model learned from having too little to go on.
+        if self._formatted(customer_id, feature, "number") == UNAVAILABLE:
+            return (
+                f"{self.label_for(feature)} cannot be measured for this customer — too little "
+                f"purchase history — and the model reads that absence itself as {effect}"
+            )
+
         if phrase is None:
             # Generic composition, so a feature without a hand-written grammar still gets a real,
             # value-bearing sentence instead of a placeholder.

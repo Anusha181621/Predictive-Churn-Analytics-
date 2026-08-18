@@ -46,6 +46,7 @@ register_template()
 st.markdown(CSS, unsafe_allow_html=True)
 
 from app.views import (  # noqa: E402
+    assistant,
     churn_risk,
     customer_360,
     executive_overview,
@@ -85,6 +86,9 @@ PAGES = [
         title="Customer 360",
         icon=":material/person_search:",
         url_path="customer-360",
+    ),
+    st.Page(
+        assistant.render, title="Ask the Data", icon=":material/forum:", url_path="ask"
     ),
     # st.Page(
     #     segmentation.render,

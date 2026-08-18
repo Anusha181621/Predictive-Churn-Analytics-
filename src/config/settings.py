@@ -118,6 +118,14 @@ class Settings:
     random_seed: int = 42
     currency: str = "EUR"
 
+    # --- AI assistant (optional) ---
+    #: API key for the dashboard's "Ask the Data" assistant. Absent is a supported state, not a
+    #: misconfiguration: without it the platform behaves exactly as it always has and the
+    #: assistant page says it is not configured. Nothing under ``src/`` reads this -- the
+    #: pipeline that produces every number stays entirely offline.
+    anthropic_api_key: str | None = None
+    assistant_model: str = "claude-opus-5"
+
     # Populated in __post_init__; not read from the environment.
     table_files: dict[str, str] = field(default_factory=dict, repr=False)
 
@@ -256,6 +264,8 @@ def _build_settings() -> Settings:
         risk_threshold_critical=_env_float("RISK_THRESHOLD_CRITICAL", 0.80),
         random_seed=_env_int("RANDOM_SEED", 42),
         currency=_env_str("CURRENCY", "EUR"),
+        anthropic_api_key=_env_str("ANTHROPIC_API_KEY", "") or None,
+        assistant_model=_env_str("ASSISTANT_MODEL", "claude-opus-5"),
     )
 
 

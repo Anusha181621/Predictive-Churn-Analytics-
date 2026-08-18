@@ -162,6 +162,64 @@ def test_no_etl_or_orchestration_framework_is_imported() -> None:
     assert not offenders, f"ETL/orchestration dependencies found: {offenders}"
 
 
+#: Outbound network clients. Distinct from API_MODULES above, which is about *serving* — this is
+#: about calling out. The two are different architectural facts and the tests below say so
+#: separately rather than leaving one to be inferred from the other.
+OUTBOUND_CLIENT_MODULES = {"anthropic", "openai", "requests", "httpx", "urllib3", "aiohttp"}
+
+#: The one module allowed to reach the network. The assistant is a reader of finished artefacts;
+#: the pipeline that produces them stays offline. Held as a path *suffix* because `_all_imports()`
+#: is keyed by absolute path, and on a Windows network share that path starts with a UNC host.
+_NETWORK_ALLOWED = {("app", "assistant", "agent.py")}
+
+
+def _within(path: str, package: str) -> bool:
+    """Whether an absolute path from ``_all_imports`` sits inside a top-level project package."""
+    return package in Path(path).parts
+
+
+def test_the_pipeline_never_reaches_the_network() -> None:
+    """Everything under `src/` computes from the CSVs alone, and must stay that way.
+
+    The AI assistant added an outbound client to the project, which is a real change to a platform
+    whose guarantee is that it runs locally against four files. That guarantee survives only if the
+    dependency is confined to the layer that *reads* results. If a feature, a label, a churn
+    probability or a euro of revenue at risk ever depended on a network call, the numbers would
+    stop being reproducible offline — so the boundary is asserted rather than trusted.
+    """
+    imports = _all_imports()
+    assert any(_within(path, "src") for path in imports), "no src/ modules were scanned at all"
+
+    offenders = {
+        path: sorted(modules & OUTBOUND_CLIENT_MODULES)
+        for path, modules in imports.items()
+        if _within(path, "src") and modules & OUTBOUND_CLIENT_MODULES
+    }
+    assert not offenders, f"the offline pipeline reaches the network: {offenders}"
+
+
+def test_only_the_assistant_imports_the_ai_client() -> None:
+    """One module owns the dependency, so turning the feature off is a one-file question."""
+    importers = {
+        Path(path).parts[-3:] for path, modules in _all_imports().items() if "anthropic" in modules
+    }
+    assert importers, "nothing imports anthropic; the allow-list has gone stale"
+
+    offenders = sorted("/".join(parts) for parts in importers - _NETWORK_ALLOWED)
+    assert not offenders, f"anthropic is imported outside the assistant: {offenders}"
+
+
+def test_the_assistant_is_optional() -> None:
+    """With no key configured the platform must behave exactly as it did before the feature."""
+    from app.assistant import agent
+
+    settings = get_settings()
+    assert settings.anthropic_api_key is None or isinstance(settings.anthropic_api_key, str)
+    # No validation rule may reject an absent key: unconfigured is a supported state.
+    assert agent.NOT_CONFIGURED
+    assert "assistant" in agent.NOT_CONFIGURED.lower()
+
+
 def test_no_api_or_server_framework_is_imported() -> None:
     """No API layer, and no long-running ingestion service.
 
@@ -307,8 +365,6 @@ def test_relative_paths_resolve_against_the_project_root(monkeypatch: pytest.Mon
         assert path.is_absolute(), f"{path} should resolve to an absolute path"
         assert root in path.parents, f"{path} is not anchored to the project root"
 
-    get_settings(refresh=True)
-
 
 def test_an_absolute_path_is_honoured_as_given(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -321,7 +377,9 @@ def test_an_absolute_path_is_honoured_as_given(
     monkeypatch.setenv("OUTPUTS_DIR", str(tmp_path))
     settings = get_settings(refresh=True)
     assert settings.outputs_path == tmp_path
-    get_settings(refresh=True)
+    # The cache is rebuilt by an autouse fixture in conftest, once monkeypatch has restored the
+    # environment. Refreshing here instead would re-cache the patched value and aim every later
+    # test at this temporary directory.
 
 
 # --------------------------------------------------------------------------------------

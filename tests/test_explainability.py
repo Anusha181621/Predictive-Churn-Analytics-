@@ -138,6 +138,27 @@ def test_missing_indicator_columns_fold_onto_the_column_they_describe() -> None:
     assert set(mapping.values()) <= set(original)
 
 
+def test_an_unmeasurable_feature_says_so_instead_of_reporting_a_blank() -> None:
+    """A one-time buyer has no purchase gap, so no regularity, gap ratio or intensity slope.
+
+    Those features still arrive here as ranked drivers: the model imputes the value and flags the
+    gap, and since the missing-indicator contributions are folded back onto their source feature,
+    the flag carries real weight. The sentence has to say the absence *is* the signal -- writing
+    "order timing regularity is not available" reports a data problem instead of a finding.
+    """
+    index = pd.Index([f"C{i}" for i in range(4)], name="customer_id")
+    values = pd.DataFrame({"purchase_regularity": [0.4, 0.6, 0.8, np.nan]}, index=index)
+    builder = NarrativeBuilder(values)
+
+    sentence = builder.sentence("C3", "purchase_regularity", 0.2)
+    assert "not available" not in sentence
+    assert "cannot be measured" in sentence
+    assert "raising churn risk" in sentence
+
+    # A customer who does have the value still gets the ordinary, value-bearing sentence.
+    assert "cannot be measured" not in builder.sentence("C0", "purchase_regularity", 0.2)
+
+
 def test_an_unplaceable_column_still_maps_to_itself() -> None:
     """The fold must not invent a home for a column it genuinely cannot place.
 

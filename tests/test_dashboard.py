@@ -45,6 +45,7 @@ PAGES = (
     "revenue_at_risk",
     "retention_action_center",
     "customer_360",
+    "assistant",
     "segmentation",
     "model_performance",
     "what_if",

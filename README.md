@@ -744,6 +744,8 @@ required.** Real environment variables take precedence over the file.
 | `RISK_THRESHOLD_CRITICAL` | `0.80` | High / Critical boundary |
 | `RANDOM_SEED` | `42` | Reproducibility |
 | `CURRENCY` | `EUR` | Display currency |
+| `ANTHROPIC_API_KEY` | *(blank)* | Switches on the [Ask the Data](#ask-the-data--the-ai-analyst) assistant. Blank leaves it off and changes nothing else |
+| `ASSISTANT_MODEL` | `claude-opus-5` | Model the assistant uses |
 
 ```python
 from src.config.settings import get_settings
@@ -762,18 +764,22 @@ you want to point `DATA_DIR` at a shared location.
 ## Testing
 
 ```bash
-pytest                                      # whole suite: 456 tests
+pytest                                      # whole suite: 520 tests
 pytest tests/test_architecture.py           # the CSV-first constraint, as executable checks
 pytest tests/test_validation.py             # the validation logic only
 pytest tests/test_features.py               # feature arithmetic and the leakage proofs
 pytest tests/test_recommendation_personas.py  # the nine customer types
 ```
 
-**456 tests, and 48 of them skip on a fresh clone.** `outputs/` and `models/` are git-ignored, so
-the tests that need generated artefacts skip with the command that produces them rather than
-failing. Nothing is silently not run: `pytest -q` reports the skips and why. Once steps 2-4 of
-[the workflow](#the-workflow) have been run, those 48 have their artefacts and the full 456 execute
-— a clean run reports `456 passed` with no skips, and takes about three minutes.
+**520 tests, and the artefact-dependent ones skip on a fresh clone.** `outputs/` and `models/` are
+git-ignored, so the tests that need generated artefacts skip rather than fail. Nothing is silently
+not run: `pytest -q` reports the skips and why. Once steps 2-4 of [the workflow](#the-workflow)
+have been run, a clean run reports `520 passed` with no skips and takes about five minutes.
+
+Test isolation is enforced in [`conftest.py`](tests/conftest.py) rather than left to each test:
+`get_settings` is cached, so an autouse fixture rebuilds that cache after every test. Without it, a
+test that pins a directory at a temporary path leaves every later test reading from it — which is
+exactly what happened once, and cost twenty passing tests before the cause was found.
 
 | Suite | What it pins |
 |---|---|
@@ -789,7 +795,8 @@ failing. Nothing is silently not run: `pytest -q` reports the skips and why. Onc
 | [`test_retention.py`](tests/test_retention.py) | Projection caps, ROI guardrails, and the assumption/policy separation. |
 | [`test_recommendation_personas.py`](tests/test_recommendation_personas.py) | The nine customer types the brief names, each asserted on the business rule rather than an exact action string. |
 | [`test_end_to_end.py`](tests/test_end_to_end.py) | The real chain over the shipped data: probability range, scoring reproducibility, live TreeSHAP against the calibrated model, and the campaign economics reconciling with the rows beneath them. |
-| [`test_dashboard.py`](tests/test_dashboard.py) | Every page rendered in a real Streamlit runtime, the five-artefact join staying 1:1, and headline figures equal to the artefacts they came from. |
+| [`test_dashboard.py`](tests/test_dashboard.py) | Every page rendered in a real Streamlit runtime, the five-artefact join staying 1:1, headline figures equal to the artefacts they came from, the top filter bar actually narrowing the page, and **no page showing a code reference** to the reader. |
+| [`test_assistant.py`](tests/test_assistant.py) | The AI analyst's six tools against the real artefacts — ordering, filtering, caps, and clean answers for inputs that do not exist — plus the agent turning itself off when no key is configured. All offline: no key, no network, no model. |
 
 Three of these earn their place by catching what unit tests structurally cannot. The architecture
 suite proves the CSVs are unmodified rather than assuming it. `test_end_to_end.py` runs TreeSHAP
@@ -1046,10 +1053,41 @@ streamlit run app/dashboard.py        # -> http://localhost:8501, Ctrl+C to stop
 Run it from the project root, with the virtual environment active; see
 [the workflow](#the-workflow) for the full procedure and the troubleshooting table.
 
-Eight pages — Executive Overview, Churn Risk, Revenue at Risk, Retention Action Center,
-Customer 360, Customer Segmentation, What-If Simulator, Model Performance — reading `data/*.csv`,
-`outputs/*.csv` and `models/*`. No database, no new pipeline. If an artefact has not been generated
-yet the page names the missing file and the command that produces it, rather than raising.
+Nine pages — Executive Overview, Churn Risk, Revenue at Risk, Retention Action Center,
+Customer 360, Ask the Data, Customer Segmentation, What-If Simulator, Model Performance — reading
+`data/*.csv`, `outputs/*.csv` and `models/*`. No database, no new pipeline. If an artefact has not
+been generated yet the page says so in plain language rather than raising; the command that
+produces it goes to the log, where the person who runs the pipeline will find it.
+
+Filters sit at the top of each page they scope, as a collapsed panel with the active slice shown
+as chips beside the match count. The sidebar carries navigation and nothing else.
+
+### Ask the Data — the AI analyst
+
+The other eight pages answer questions somebody thought to build a page for. This one answers the
+rest: ask in plain language and a Claude agent queries the same artefacts the pages render.
+
+**It is optional and off by default.** Set `ANTHROPIC_API_KEY` in `.env` to switch it on. Without
+it every other page is unaffected and this one says it has not been configured — the platform's
+guarantee that it runs locally against four CSV files does not depend on a network connection.
+
+**The pipeline never calls out.** `tests/test_architecture.py` asserts that nothing under `src/`
+imports an outbound client, and that `anthropic` is imported by exactly one module. Features,
+churn probabilities, explanations and retention economics are computed exactly as before; the
+assistant only reads what they produced, and cannot change a figure.
+
+**The model supplies no numbers.** It has six tools —
+[`app/assistant/tools.py`](app/assistant/tools.py) — over the customer book, one customer's
+drivers, group breakdowns, the global driver ranking and the model's own accuracy. Every figure in
+an answer came back from one of them, and the page shows which ones ran, so an answer can be
+checked against the page that already displays it. The system prompt requires that assumption-
+dependent figures (expected retained revenue, ROI) are labelled, that churn is described as a
+probability rather than a verdict on an individual, and that questions the data cannot support —
+marketing spend, campaign history, web analytics — are declined rather than answered with an
+invented number.
+
+Cost is roughly a few cents per question against `claude-opus-5` (configurable via
+`ASSISTANT_MODEL`); a question typically spends 5–15k input and 0.5–1.5k output tokens.
 
 ### One name for revenue at risk
 
