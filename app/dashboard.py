@@ -36,7 +36,7 @@ if str(_ROOT) not in sys.path:
 from app.theme import CSS, register_template  # noqa: E402
 
 st.set_page_config(
-    page_title="Fashion Churn & Retention",
+    page_title="Customer Churn & Retention",
     page_icon=":material/insights:",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -86,21 +86,21 @@ PAGES = [
         icon=":material/person_search:",
         url_path="customer-360",
     ),
-    st.Page(
-        segmentation.render,
-        title="Customer Segmentation",
-        icon=":material/donut_large:",
-        url_path="segmentation",
-    ),
-    st.Page(
-        what_if.render, title="What-If Simulator", icon=":material/tune:", url_path="what-if"
-    ),
-    st.Page(
-        model_performance.render,
-        title="Model Performance",
-        icon=":material/analytics:",
-        url_path="model-performance",
-    ),
+    # st.Page(
+    #     segmentation.render,
+    #     title="Customer Segmentation",
+    #     icon=":material/donut_large:",
+    #     url_path="segmentation",
+    # ),
+    # st.Page(
+    #     what_if.render, title="What-If Simulator", icon=":material/tune:", url_path="what-if"
+    # ),
+    # st.Page(
+    #     model_performance.render,
+    #     title="Model Performance",
+    #     icon=":material/analytics:",
+    #     url_path="model-performance",
+    # ),
 ]
 
 
