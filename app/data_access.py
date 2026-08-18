@@ -41,6 +41,9 @@ import streamlit as st
 
 from src.config.settings import Settings, get_settings
 from src.data.csv_loader import Datasets, load_all
+from src.utils.logging_config import get_logger
+
+logger = get_logger("app.data_access")
 
 __all__ = [
     "ARTEFACTS",
@@ -116,6 +119,24 @@ ARTEFACTS: dict[str, Artefact] = {
 }
 
 
+#: What each generated file is called when a reader has to be told it is missing. A filename is
+#: an implementation detail; "the churn predictions" is the thing they are actually waiting for.
+DISPLAY_NAMES: dict[str, str] = {
+    "features": "Customer profiles",
+    "predictions": "Churn predictions",
+    "explanations": "Churn driver explanations",
+    "scores": "Retention scores",
+    "recommendations": "Retention recommendations",
+    "assumptions": "Campaign assumptions",
+    "metrics": "Model performance results",
+    "quality": "Source data quality checks",
+    "shap_summary": "Churn driver summary",
+    "shap_importance": "Churn driver ranking",
+    "shap_dependence": "Churn driver detail",
+    "model": "The trained churn model",
+}
+
+
 class MissingArtefact(RuntimeError):
     """Raised when a page needs a generated file that has not been produced yet."""
 
@@ -167,21 +188,29 @@ def missing(*keys: str) -> list[Artefact]:
 
 
 def require(*keys: str) -> None:
-    """Stop the page with actionable guidance if any required artefact is absent.
+    """Stop the page with plain-language guidance if any required artefact is absent.
 
-    ``outputs/`` and ``models/`` are git-ignored, so a fresh clone has neither. Showing the
-    command that produces the missing file is more useful than a traceback about a path.
+    ``outputs/`` and ``models/`` are git-ignored, so a fresh clone has neither. What the reader
+    needs is what is missing and who can restore it -- not a shell command. The command that
+    produces each file stays on :class:`Artefact` for whoever operates the pipeline, and is
+    logged rather than rendered, so an administrator reading the log still gets it directly.
     """
     absent = missing(*keys)
     if not absent:
         return
-    commands = sorted({a.command for a in absent})
-    names = "\n".join(f"- `{a.directory}/{a.filename}`" for a in absent)
+
+    logger.error(
+        "Page blocked: %s missing. Regenerate with: %s",
+        ", ".join(f"{a.directory}/{a.filename}" for a in absent),
+        "; ".join(sorted({a.command for a in absent})),
+    )
+    names = "\n".join(f"- {DISPLAY_NAMES.get(a.key, a.key.replace('_', ' ').capitalize())}"
+                      for a in absent)
     st.error(
-        "**This page needs generated files that are not there yet.**\n\n"
-        f"Missing:\n{names}\n\n"
-        "Run the pipeline first, from the project root:\n\n"
-        "```bash\n" + "\n".join(commands) + "\n```"
+        "**This view is waiting on the latest analysis.**\n\n"
+        f"Not available yet:\n{names}\n\n"
+        "The analysis is refreshed as a scheduled job. Ask whoever administers this dashboard "
+        "to run the refresh, then reload the page."
     )
     st.stop()
 

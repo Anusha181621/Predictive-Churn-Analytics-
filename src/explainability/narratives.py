@@ -51,10 +51,16 @@ __all__ = [
 # --------------------------------------------------------------------------------------
 
 
+#: What a value renders as when there is nothing to render. A sentence must never *contain* this
+#: word -- a driver that reads "spreads spending across not available categories" is worse than no
+#: sentence at all -- so it doubles as the signal that a template's supporting context is missing.
+UNAVAILABLE = "not available"
+
+
 def format_value(value: object, kind: str, currency: str = "EUR") -> str:
     """Render a raw feature value the way a business user would expect to read it."""
     if value is None or (isinstance(value, float) and np.isnan(value)):
-        return "not available"
+        return UNAVAILABLE
     if isinstance(value, (bool, np.bool_)):
         return "yes" if bool(value) else "no"
     if kind == "text":
@@ -399,8 +405,14 @@ class NarrativeBuilder:
 
     def _formatted(self, customer_id, feature: str, kind: str) -> str:
         if feature not in self.values.columns:
-            return "not available"
+            return UNAVAILABLE
         return format_value(self.values.at[customer_id, feature], kind, self.currency)
+
+    def _generic_sentence(self, customer_id, feature: str, effect: str) -> str:
+        """The composition used when no hand-written grammar can be supported for this row."""
+        value = self._formatted(customer_id, feature, "number")
+        clause = self._cohort_clause(customer_id, feature)
+        return f"{self.label_for(feature)} is {value}{clause} — {effect}"
 
     def _cohort_clause(self, customer_id, feature: str) -> str:
         """"...higher than 92% of customers", or empty when there is no useful comparison."""
@@ -454,9 +466,7 @@ class NarrativeBuilder:
         if phrase is None:
             # Generic composition, so a feature without a hand-written grammar still gets a real,
             # value-bearing sentence instead of a placeholder.
-            value = self._formatted(customer_id, feature, "number")
-            clause = self._cohort_clause(customer_id, feature)
-            return f"{self.label_for(feature)} is {value}{clause} — {effect}"
+            return self._generic_sentence(customer_id, feature, effect)
 
         template = self._resolve_template(customer_id, feature, phrase)
         substitutions: dict[str, str] = {
@@ -471,6 +481,14 @@ class NarrativeBuilder:
             substitutions["companion"] = self._formatted(
                 customer_id, phrase.companion, phrase.companion_kind or phrase.kind
             )
+
+        # A grammar may lean on companion columns that this run's feature matrix does not carry --
+        # feature selection trims the matrix, so `category_diversity`'s "across {category_count}
+        # categories" outlived `category_count` itself. Composing anyway printed "spreads spending
+        # across not available categories" to a CRM manager. Fall back to the generic sentence,
+        # which needs nothing but the feature's own value.
+        if any(text == UNAVAILABLE for key, text in substitutions.items() if key != "value"):
+            return self._generic_sentence(customer_id, feature, effect)
 
         try:
             body = template.format(**substitutions)

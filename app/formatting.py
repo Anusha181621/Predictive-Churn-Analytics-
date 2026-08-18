@@ -19,6 +19,8 @@ __all__ = [
     "signed_percent",
     "ratio",
     "days",
+    "horizon_days",
+    "horizon_phrase",
 ]
 
 _SYMBOLS = {"EUR": "€", "USD": "$", "GBP": "£"}
@@ -84,3 +86,19 @@ def days(value: float | None) -> str:
         return "—"
     count = int(round(float(value)))
     return f"{count:,} day" + ("" if count == 1 else "s")
+
+
+def horizon_days() -> int:
+    """The churn horizon every probability on screen describes, in days.
+
+    Read rather than restated. The horizon moved from 180 days to 90 when the model was retrained,
+    and the pages that had spelled "180 days" into their copy went on saying so -- a wrong number
+    presented with the same confidence as a right one. Nothing on a page should name this figure
+    from memory.
+    """
+    return int(get_settings().churn_inactivity_days)
+
+
+def horizon_phrase() -> str:
+    """``next 90 days``, for embedding mid-sentence."""
+    return f"next {horizon_days()} days"

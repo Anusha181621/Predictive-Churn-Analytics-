@@ -23,7 +23,15 @@ from app.data_access import (
     prediction_date,
     require,
 )
-from app.formatting import days, integer, money, percent, ratio, signed_percent
+from app.formatting import (
+    days,
+    horizon_phrase,
+    integer,
+    money,
+    percent,
+    ratio,
+    signed_percent,
+)
 from app.theme import SURFACE, categorical
 
 ORDER_COLUMNS = ["Order date", "Category", "Brand", "SKU", "Units", "Discount %", "Net value"]
@@ -43,9 +51,16 @@ def render() -> None:
 
     ordered = master.sort_values("retention_opportunity_score", ascending=False)
     options = ordered["customer_id"].tolist()
-    st.sidebar.markdown("### Customer")
-    st.sidebar.caption("Ordered by retention opportunity, highest first.")
-    customer_id = st.sidebar.selectbox("Customer ID", options, index=0, key="c360_pick")
+
+    picker, note = st.columns([2, 3], gap="medium", vertical_alignment="center")
+    with picker:
+        customer_id = st.selectbox("Customer", options, index=0, key="c360_pick")
+    with note:
+        st.markdown(
+            '<p class="section-note">Ordered by retention opportunity, highest first — the '
+            "customer at the top is where a retention euro goes furthest.</p>",
+            unsafe_allow_html=True,
+        )
 
     row = master.loc[master["customer_id"] == customer_id].iloc[0]
 
@@ -126,7 +141,7 @@ def _risk_and_drivers(row: pd.Series, customer_id: str) -> None:
             Kpi(
                 "Churn probability",
                 percent(row.get("churn_probability")),
-                "No purchase in the next 180 days",
+                f"No purchase in the {horizon_phrase()}",
             ),
             Kpi("Risk level", str(row.get("risk_level", "—"))),
             Kpi(
@@ -137,7 +152,7 @@ def _risk_and_drivers(row: pd.Series, customer_id: str) -> None:
             Kpi(
                 "Expected future revenue",
                 money(row.get("expected_future_revenue")),
-                "Next 180 days",
+                horizon_phrase().capitalize(),
             ),
         ]
     )
@@ -145,7 +160,7 @@ def _risk_and_drivers(row: pd.Series, customer_id: str) -> None:
     explanations = load_explanations()
     drivers = explanations[explanations["Customer ID"] == customer_id].sort_values("Driver rank")
     if drivers.empty:
-        st.info("No SHAP drivers were recorded for this customer.")
+        st.info("No churn drivers were recorded for this customer.")
         return
 
     left, right = st.columns([3, 4], gap="medium")
@@ -168,9 +183,9 @@ def _risk_and_drivers(row: pd.Series, customer_id: str) -> None:
                 f"{driver['Human-readable explanation']}"
             )
         st.caption(
-            "Contributions are on the model's uncalibrated log-odds scale. Calibration is "
-            "monotone, so the ranking and direction carry over to the reported probability, but "
-            "the values do not sum to it."
+            "Drivers are ranked by how much each one moved this customer's risk, and the "
+            "direction is measured rather than assumed. The individual amounts explain the "
+            "ranking, not the percentage itself — they do not add up to it."
         )
 
 

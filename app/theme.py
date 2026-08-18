@@ -254,6 +254,17 @@ CSS = f"""
     font-size: 0.75rem; font-weight: 600; color: #fff;
   }}
 
+  /* filter bar ----------------------------------------------------------------- */
+  /* Chips are outlined rather than filled: the risk pills above them are filled, and two
+     filled badge styles on one page read as two kinds of status. A filter is not a status. */
+  .filter-summary {{ font-size: 0.82rem; color: {INK_SECONDARY}; line-height: 2.1; }}
+  .filter-chip {{
+    display: inline-block; padding: 1px 9px; margin: 0 4px 0 0;
+    border: 1px solid {BORDER}; border-radius: 999px; background: {SURFACE};
+    font-size: 0.74rem; color: {INK_SECONDARY}; white-space: nowrap;
+  }}
+  .filter-chip b {{ color: {INK}; font-weight: 600; }}
+
   /* assumption banner ---------------------------------------------------------- */
   .assumption {{
     border-left: 3px solid {STATUS["warning"]};

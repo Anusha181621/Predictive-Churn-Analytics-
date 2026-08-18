@@ -174,7 +174,12 @@ def test_every_declared_artefact_names_the_command_that_makes_it() -> None:
 
 
 def test_a_missing_artefact_produces_guidance_rather_than_a_traceback() -> None:
-    """A fresh clone has no `outputs/`. The page must say what to run, not raise."""
+    """A fresh clone has no `outputs/`. The page must explain itself, not raise.
+
+    The guidance is written for whoever is looking at the dashboard, who is not necessarily the
+    person who runs the pipeline. It names what is missing in business terms and says who can
+    restore it; the shell command lives on ``Artefact.command`` and goes to the log instead.
+    """
     app = AppTest.from_string(
         """
 import sys
@@ -204,7 +209,10 @@ st.write("should not get here")
     assert not app.exception, "a missing artefact raised instead of guiding"
     assert app.error, "no guidance was shown for the missing artefact"
     message = app.error[0].value
-    assert "python scripts/" in message, "the guidance does not name a command to run"
+    assert "Churn predictions" in message, "the guidance does not name what is missing"
+    assert "reload the page" in message, "the guidance does not say what to do next"
+    for fragment in ("python scripts/", "```", ".csv", "outputs/"):
+        assert fragment not in message, f"the guidance still shows a code reference: {fragment}"
 
 
 # ======================================================================================
@@ -237,6 +245,69 @@ def test_page_produces_visible_content(page: str) -> None:
     app = _run_page(page)
     rendered = len(app.markdown) + len(app.dataframe) + len(app.get("plotly_chart"))
     assert rendered > 3, f"{page} rendered almost nothing ({rendered} elements)"
+
+
+#: Fragments that betray the implementation to a reader who did not build it. A dashboard that
+#: tells a retention manager to run `python scripts/predict.py` has stopped being a product.
+_CODE_REFERENCES = (
+    "scripts/",
+    ".csv",
+    ".json",
+    ".joblib",
+    "src/",
+    "outputs/",
+    "models/",
+    "```",
+    "log-odds",
+    "artefact",
+)
+
+#: Business vocabulary that happens to contain a banned fragment. "Customer.csv" is a file;
+#: "SKU" and "CSV export" are things a merchandiser says out loud.
+_ALLOWED = ("download for excel",)
+
+
+def _visible_text(app: AppTest) -> list[str]:
+    """Every string the page actually puts in front of a reader."""
+    chunks: list[str] = []
+    for kind in ("markdown", "caption", "error", "info", "success", "warning"):
+        for element in app.get(kind):
+            chunks.append(str(element.value))
+    return chunks
+
+
+@requires_artefacts
+@pytest.mark.parametrize("page", CSV_ONLY_PAGES)
+def test_no_page_shows_a_code_reference(page: str) -> None:
+    """Every visible string must name a business concept, not a file, script or library."""
+    app = _run_page(page)
+    offenders = [
+        (fragment, chunk.strip()[:160])
+        for chunk in _visible_text(app)
+        for fragment in _CODE_REFERENCES
+        if fragment in chunk.lower()
+        and not any(allowed in chunk.lower() for allowed in _ALLOWED)
+    ]
+    assert not offenders, f"{page} shows code references: {offenders[:4]}"
+
+
+@requires_artefacts
+def test_the_filter_bar_narrows_the_page_it_scopes() -> None:
+    """The filters are only worth having if every number below them moves together."""
+    app = _run_page("churn_risk")
+    assert app.multiselect, "the filter bar rendered no controls"
+
+    master = data_access.load_customer_master()
+    unfiltered = "\n".join(_visible_text(app))
+    assert f"{len(master):,}" in unfiltered, "the bar does not report the unfiltered population"
+
+    risk = next(m for m in app.multiselect if m.key.endswith("_risk"))
+    app = risk.set_value(["Critical"]).run(timeout=300)
+
+    expected = int(master["risk_level"].eq("Critical").sum())
+    filtered = "\n".join(_visible_text(app))
+    assert f"{expected:,}" in filtered, "the match count did not follow the filter"
+    assert "Critical" in filtered, "the active selection is not shown as a chip"
 
 
 @requires_artefacts

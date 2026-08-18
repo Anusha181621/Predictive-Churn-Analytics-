@@ -14,12 +14,12 @@ from app.charts.distributions import (
     probability_by_group,
     risk_level_distribution,
 )
-from app.components.filters import filter_caption, render_filters
+from app.components.filters import render_filters
 from app.components.kpi import Kpi, kpi_row
 from app.components.layout import chart_card, page_header, section
 from app.components.tables import data_table
 from app.data_access import load_customer_master, prediction_date, require
-from app.formatting import integer, money, percent
+from app.formatting import horizon_phrase, integer, money, percent
 from src.config.settings import get_settings
 
 TABLE_COLUMNS = [
@@ -51,12 +51,13 @@ def render() -> None:
         as_of=as_of,
     )
 
-    frame, selections = render_filters(master, namespace="risk")
+    frame, _ = render_filters(master, namespace="risk")
     if frame.empty:
-        st.warning("No customers match the current filters. Clear one to see results.")
+        st.warning(
+            "No customers match the current filters. Use **Clear all** above, or open "
+            "**Filters** and widen one."
+        )
         return
-
-    st.caption(f"Showing **{len(frame):,}** customers · {filter_caption(selections)}")
 
     kpi_row(
         [
@@ -91,8 +92,8 @@ def render() -> None:
     with left:
         chart_card(
             "Churn probability distribution",
-            "Isotonic calibration maps customers onto a limited set of distinct probabilities, "
-            "which is why the shape is stepped rather than smooth.",
+            f"Every customer's likelihood of not buying again within the {horizon_phrase()}, "
+            "with the risk-band edges marked.",
         )
         st.plotly_chart(
             churn_probability_distribution(frame, thresholds=thresholds),

@@ -115,6 +115,39 @@ def test_longest_prefix_wins_so_similar_names_do_not_collide() -> None:
     assert mapping["category_Apparel"] == "category"
 
 
+def test_missing_indicator_columns_fold_onto_the_column_they_describe() -> None:
+    """``SimpleImputer(add_indicator=True)`` prefixes rather than suffixes the source column.
+
+    Prefix matching cannot see a prefix that is on the front, so these columns used to map to
+    themselves and were then dropped when the folded frame was reindexed onto the original
+    features. That silently deleted real explanation mass and broke SHAP additivity -- the folded
+    contributions no longer summed to the margin -- without any error. The flag says "we did not
+    know this customer's value for that feature", so it belongs to that feature.
+    """
+    expanded = [
+        "purchase_gap_std",
+        "gap_vs_max_gap_ratio",
+        "missingindicator_purchase_gap_std",
+        "missingindicator_gap_vs_max_gap_ratio",
+    ]
+    original = ["purchase_gap_std", "gap_vs_max_gap_ratio"]
+    mapping = _map_expanded_to_original(expanded, original)
+    assert mapping["missingindicator_purchase_gap_std"] == "purchase_gap_std"
+    assert mapping["missingindicator_gap_vs_max_gap_ratio"] == "gap_vs_max_gap_ratio"
+    # Every expanded column must land on a real feature, or the reindex discards it.
+    assert set(mapping.values()) <= set(original)
+
+
+def test_an_unplaceable_column_still_maps_to_itself() -> None:
+    """The fold must not invent a home for a column it genuinely cannot place.
+
+    Mapping it to itself is what lets ``compute_shap_values`` notice it is unplaced and warn,
+    rather than folding an unknown transformer's output onto an arbitrary feature.
+    """
+    mapping = _map_expanded_to_original(["pca_0"], ["recency_days"])
+    assert mapping["pca_0"] == "pca_0"
+
+
 def test_unwrapping_a_non_pipeline_is_a_clear_error() -> None:
     """Better than silently falling back to a slow, approximate explainer."""
     with pytest.raises(TypeError, match="TreeExplainer needs"):
@@ -229,6 +262,30 @@ def test_context_features_are_interpolated(shap_result: ShapResult) -> None:
     sentence = builder.sentence("CUST0003", "days_since_preferred_category_purchase", 0.5)
     assert "Accessories" in sentence
     assert "673 days" in sentence
+
+
+def test_a_sentence_never_prints_not_available_inside_its_own_wording() -> None:
+    """Feature selection can trim away a column another feature's grammar leans on.
+
+    ``category_diversity``'s template reads "spreads spending across {category_count} categories",
+    but the 20-column feature matrix keeps the diversity score and drops the count. Composing the
+    template regardless put "spreads spending across not available categories" in front of a CRM
+    manager. The generic composition needs nothing but the feature's own value, so it is the right
+    fallback -- a weaker sentence, never a broken one.
+    """
+    index = pd.Index([f"C{i}" for i in range(5)], name="customer_id")
+    values = pd.DataFrame({"category_diversity": np.linspace(0.1, 0.9, 5)}, index=index)
+    builder = NarrativeBuilder(values)
+    sentence = builder.sentence("C4", "category_diversity", -0.3)
+    assert "not available" not in sentence
+    assert "Category diversity" in sentence
+    assert "0.90" in sentence
+    assert "lowering churn risk" in sentence
+
+    # With the companion column present, the richer grammar is still the one that gets used.
+    values["category_count"] = [1, 2, 3, 4, 5]
+    richer = NarrativeBuilder(values).sentence("C4", "category_diversity", -0.3)
+    assert "Spreads spending across 5 categories" in richer
 
 
 def test_a_feature_without_vocabulary_still_gets_a_real_sentence(

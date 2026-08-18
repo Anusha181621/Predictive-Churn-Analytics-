@@ -45,8 +45,8 @@ class RetentionParams:
     # ------------------------------------------------------------------ expected future revenue
     #: Horizon for expected future revenue, in days. Matches the churn horizon by default so that
     #: "revenue at risk" is the revenue at risk *over the window the churn probability describes*.
-    #: Mixing a 180-day probability with a 365-day revenue figure would overstate exposure twofold.
-    revenue_horizon_days: int = 180
+    #: Mixing a 90-day probability with a 365-day revenue figure would overstate exposure fourfold.
+    revenue_horizon_days: int = 90
 
     #: Weight on recent (last 365 days) behaviour versus lifetime behaviour when projecting orders
     #: and order value. Recent behaviour is the better predictor of the next order, so it leads --

@@ -16,7 +16,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from app.formatting import currency_symbol
+from app.formatting import currency_symbol, horizon_phrase
 
 __all__ = ["COLUMN_LABELS", "data_table", "download_button"]
 
@@ -114,7 +114,7 @@ def _config_for(column: str, label: str) -> object:
         "expected_average_order_value",
     }
     rates = {
-        "churn_probability": "Probability of no purchase in the next 180 days.",
+        "churn_probability": f"Likelihood of no purchase in the {horizon_phrase()}.",
         "return_rate": None,
         "retention_propensity": "ASSUMED, not measured: this dataset has no campaign log.",
         "expected_roi": "(expected revenue retained − campaign cost) / campaign cost.",
@@ -164,14 +164,20 @@ def data_table(
     download_button(view, download_name, key=f"{key or download_name}_dl")
 
 
-def download_button(frame: pd.DataFrame, filename: str, *, key: str | None = None) -> None:
+def download_button(
+    frame: pd.DataFrame, filename: str, *, key: str | None = None, label: str | None = None
+) -> None:
     """Export exactly the rows and columns on screen, at full precision.
+
+    The button is labelled for the reader, not for the file system: a business user downloading a
+    customer list does not need to be told its filename before they click. ``filename`` still
+    names the file they receive.
 
     utf-8-sig for the same reason the pipeline writes it: the city names include Düsseldorf and
     Liège, and Excel on Windows mangles them without a BOM.
     """
     st.download_button(
-        f"Download {filename}",
+        label or "Download for Excel",
         data=frame.to_csv(index=False).encode("utf-8-sig"),
         file_name=filename,
         mime="text/csv",

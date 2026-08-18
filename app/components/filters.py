@@ -1,10 +1,15 @@
-"""Sidebar filters, shared by every page that shows a customer population.
+"""The filter bar, shared by every page that shows a customer population.
 
-Two properties matter more than the widgets themselves.
+Three properties matter more than the widgets themselves.
 
-**One filter set scopes a whole page.** Filters live in the sidebar, never inside a chart card,
-so every chart on the page re-renders against the same slice. Two charts showing different
+**One filter set scopes a whole page.** One bar sits at the top of the page, never inside a chart
+card, so every chart below re-renders against the same slice. Two charts showing different
 populations under the same heading is the fastest way to make a dashboard untrustworthy.
+
+**The active slice is readable without opening anything.** The controls collapse, but the
+selections do not: they stay on screen as chips beside the match count. A filtered dashboard whose
+filters are hidden is a dashboard that gets quoted wrongly in a meeting, so the cost of collapsing
+the controls is paid back by showing the result of them permanently.
 
 **Domains come from the unfiltered data.** ``options`` for every widget are computed from the
 full customer master, so narrowing one filter never removes options from another and -- more
@@ -56,21 +61,30 @@ def _options(master: pd.DataFrame, spec: FilterSpec) -> list[str]:
     return sorted(values)
 
 
+#: How many filter controls sit side by side inside the panel. Four keeps each multiselect wide
+#: enough to show a selected value rather than truncating it, on a 1500px page.
+_COLUMNS = 4
+
+
+def _chips(selections: dict[str, list[str]]) -> str:
+    """The active slice as inline badges: what is on screen, without opening the panel."""
+    return " ".join(
+        f'<span class="filter-chip"><b>{label}</b> {", ".join(values)}</span>'
+        for label, values in selections.items()
+    )
+
+
 def render_filters(
     master: pd.DataFrame,
     specs: tuple[FilterSpec, ...] = CUSTOMER_FILTERS,
     *,
     namespace: str = "flt",
 ) -> tuple[pd.DataFrame, dict[str, list[str]]]:
-    """Draw the filters and return ``(filtered_frame, active_selections)``.
+    """Draw the filter bar and return ``(filtered_frame, active_selections)``.
 
     An empty selection means "no constraint" rather than "nothing", which is what a reader
     expects from a blank filter and avoids the dead-end of an accidentally empty page.
     """
-    st.sidebar.markdown("### Filters")
-    selections: dict[str, list[str]] = {}
-    filtered = master
-
     # Widget keys carry a "flt_" prefix so they can never collide with a chart or table key on
     # the same page. Streamlit's duplicate-key check spans every element in a run, not just
     # widgets, so a filter named after a dimension would otherwise clash with the chart that
@@ -78,28 +92,58 @@ def render_filters(
     def widget_key(spec: FilterSpec) -> str:
         return f"flt_{namespace}_{spec.key}"
 
-    for spec in specs:
-        if spec.column not in master.columns:
-            continue
-        chosen = st.sidebar.multiselect(
-            spec.label,
-            options=_options(master, spec),
-            default=[],
-            key=widget_key(spec),
-            placeholder="All",
-        )
+    usable = [spec for spec in specs if spec.column in master.columns]
+
+    # The panel is drawn before the summary line even though it appears below it, because the
+    # summary counts the rows the widgets select. Streamlit renders in call order, so the summary
+    # is written into containers reserved here and filled once the count is known.
+    summary = st.container()
+
+    with st.expander("Filters", expanded=False):
+        chosen_by_spec: dict[str, list[str]] = {}
+        for start in range(0, len(usable), _COLUMNS):
+            row = usable[start : start + _COLUMNS]
+            # A short final row must not stretch its widgets across the page, so every row is
+            # laid out on the full grid and the empty cells are simply left unused.
+            cols = st.columns(_COLUMNS, gap="medium")
+            for col, spec in zip(cols, row):
+                with col:
+                    chosen_by_spec[spec.key] = st.multiselect(
+                        spec.label,
+                        options=_options(master, spec),
+                        default=[],
+                        key=widget_key(spec),
+                        placeholder="All",
+                    )
+
+    selections: dict[str, list[str]] = {}
+    filtered = master
+    for spec in usable:
+        chosen = chosen_by_spec.get(spec.key) or []
         if chosen:
             selections[spec.label] = chosen
             filtered = filtered[filtered[spec.column].astype(str).isin(chosen)]
 
-    if selections and st.sidebar.button(
-        "Clear filters", width="stretch", key=f"flt_{namespace}_clear"
-    ):
-        for spec in specs:
-            st.session_state.pop(widget_key(spec), None)
-        st.rerun()
+    with summary:
+        left, right = st.columns([5, 1], gap="small", vertical_alignment="center")
+        with left:
+            count = (
+                f"Showing all <b>{len(master):,}</b> customers"
+                if not selections
+                else f"<b>{len(filtered):,}</b> of {len(master):,} customers"
+            )
+            st.markdown(
+                f'<div class="filter-summary">{count}&nbsp; {_chips(selections)}</div>',
+                unsafe_allow_html=True,
+            )
+        with right:
+            if selections and st.button(
+                "Clear all", width="stretch", key=f"flt_{namespace}_clear"
+            ):
+                for spec in usable:
+                    st.session_state.pop(widget_key(spec), None)
+                st.rerun()
 
-    st.sidebar.caption(f"{len(filtered):,} of {len(master):,} customers match")
     return filtered, selections
 
 

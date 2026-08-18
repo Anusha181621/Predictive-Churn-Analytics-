@@ -95,6 +95,10 @@ PAGES = [
     # st.Page(
     #     what_if.render, title="What-If Simulator", icon=":material/tune:", url_path="what-if"
     # ),
+    # Model Performance is written for a data audience -- ROC-AUC, PR-AUC, Brier, calibration
+    # error, permutation importance, per-feature contribution tables -- and is deliberately kept
+    # out of the customer-facing navigation. `app/views/model_performance.py` is still maintained
+    # and still covered by the tests; add the page back here to expose it.
     # st.Page(
     #     model_performance.render,
     #     title="Model Performance",
@@ -105,16 +109,11 @@ PAGES = [
 
 
 def main() -> None:
+    # The sidebar carries navigation and nothing else. Filters, the customer picker and the
+    # simulator's controls all sit at the top of the page they scope, where a reader looks for
+    # them and where they stay next to the numbers they change.
     page = st.navigation(PAGES, position="sidebar")
     page.run()
-
-    # Drawn after the page so it sits below the page's own filters rather than above them.
-    with st.sidebar:
-        st.divider()
-        st.caption(
-            "Source of truth: the four CSVs in `data/`. "
-            "Every figure is read from the pipeline's own artefacts."
-        )
 
 
 main()

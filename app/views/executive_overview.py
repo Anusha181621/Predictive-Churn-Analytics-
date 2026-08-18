@@ -24,7 +24,14 @@ from app.data_access import (
     prediction_date,
     require,
 )
-from app.formatting import integer, money, money_compact, percent, signed_percent
+from app.formatting import (
+    horizon_phrase,
+    integer,
+    money,
+    money_compact,
+    percent,
+    signed_percent,
+)
 from app.theme import RISK_COLOURS, RISK_ORDER
 from src.config.settings import get_settings
 
@@ -52,7 +59,7 @@ def render() -> None:
     expected_future = float(master["expected_future_revenue"].sum())
 
     hero(
-        "Revenue at risk over the next 180 days",
+        f"Revenue at risk over the {horizon_phrase()}",
         money(revenue_at_risk),
         f"{percent(revenue_at_risk / expected_future) if expected_future else '—'} of the "
         f"{money(expected_future)} expected future revenue. "
@@ -172,7 +179,7 @@ def render() -> None:
     with right:
         chart_card(
             "Risk by acquisition channel",
-            "The channel that acquired the customer, from Customer.csv.",
+            "The channel each customer was originally acquired through.",
         )
         st.plotly_chart(
             risk_mix(master, "acquisition_channel", height=420),
@@ -201,9 +208,9 @@ def _data_quality_panel() -> None:
         expanded=not ok,
     ):
         st.markdown(
-            f"Validated directly against the four source CSVs: "
+            f"Checked against the customer, transaction, return and product records: "
             f"**{totals.get('errors', 0)}** errors, **{totals.get('warnings', 0)}** warnings. "
-            "The validators only ever report — nothing in this project rewrites `data/`."
+            "These checks only ever report — the source records are never altered."
         )
         dataset = report.get("dataset", {})
         rate = dataset.get("unit_return_rate")

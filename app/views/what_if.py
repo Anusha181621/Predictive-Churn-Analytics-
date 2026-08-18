@@ -220,8 +220,8 @@ def render() -> None:
 
     if _is_baseline(controls, defaults):
         st.success(
-            "These controls are at the pipeline's default assumptions, so the figures above "
-            "reproduce the shipped plan exactly — the simulator and `scripts/retention.py` agree."
+            "These controls are at their default assumptions, so the figures above reproduce "
+            "the published retention plan exactly."
         )
 
     net = retained_revenue - cost
@@ -272,70 +272,82 @@ def render() -> None:
         download_name="what_if_scenario.csv",
         key="wi_table",
         height=400,
-        caption="Produced by the same code path as `python scripts/retention.py`.",
+        caption="Every customer this scenario would contact, and what it expects back from each.",
     )
 
 
 def _controls(defaults: RetentionParams) -> dict[str, float]:
-    """The five inputs the brief asks for, in the sidebar."""
-    st.sidebar.markdown("### Campaign assumptions")
-    st.sidebar.caption("These re-run the decision layer.")
+    """The five inputs the brief asks for, above the results they drive.
 
-    propensity = st.sidebar.slider(
-        "Intervention success rate (ASSUMED)",
-        min_value=0.05,
-        max_value=0.60,
-        value=float(defaults.base_retention_propensity),
-        step=0.01,
-        format="%.0f%%",
-        help="Probability that contacting a customer changes their behaviour. "
-        "Cannot be measured from this dataset.",
-    )
-    communication_cost = st.sidebar.slider(
-        "Communication cost per contact",
-        min_value=0.0,
-        max_value=15.0,
-        value=float(defaults.communication_cost),
-        step=0.25,
-        help=f"A further {defaults.campaign_overhead_per_customer:.2f} of overhead is added per "
-        "targeted customer.",
-    )
-    max_discount = st.sidebar.slider(
-        "Maximum discount depth offered (%)",
-        min_value=10.0,
-        max_value=50.0,
-        value=float(defaults.max_offer_discount_pct),
-        step=5.0,
-        help="Caps how deep an offer the engine may propose. The depth actually offered still "
-        "comes from what each customer has responded to.",
-    )
-    min_roi = st.sidebar.slider(
-        "Minimum expected ROI to contact",
-        min_value=-0.5,
-        max_value=2.0,
-        value=float(defaults.min_expected_roi),
-        step=0.05,
-        format="%.0f%%",
-        help="Customers below this are downgraded to Do Not Target.",
-    )
+    Two groups, and the distinction between them is the point: the first four change what the
+    plan *recommends*, the last two only change who is *shown*. Mixing them in one list invites
+    a reader to conclude that raising a display threshold improved the campaign.
+    """
+    with st.expander("Scenario controls", expanded=True):
+        st.markdown("**Campaign assumptions** — these re-run the plan")
+        first, second, third, fourth = st.columns(4, gap="medium")
+        with first:
+            propensity = st.slider(
+                "Intervention success rate (ASSUMED)",
+                min_value=0.05,
+                max_value=0.60,
+                value=float(defaults.base_retention_propensity),
+                step=0.01,
+                format="%.0f%%",
+                help="Probability that contacting a customer changes their behaviour. "
+                "Cannot be measured from this dataset.",
+            )
+        with second:
+            communication_cost = st.slider(
+                "Communication cost per contact",
+                min_value=0.0,
+                max_value=15.0,
+                value=float(defaults.communication_cost),
+                step=0.25,
+                help=f"A further {defaults.campaign_overhead_per_customer:.2f} of overhead is "
+                "added per targeted customer.",
+            )
+        with third:
+            max_discount = st.slider(
+                "Maximum discount depth offered (%)",
+                min_value=10.0,
+                max_value=50.0,
+                value=float(defaults.max_offer_discount_pct),
+                step=5.0,
+                help="Caps how deep an offer may go. The depth actually offered still comes from "
+                "what each customer has responded to.",
+            )
+        with fourth:
+            min_roi = st.slider(
+                "Minimum expected ROI to contact",
+                min_value=-0.5,
+                max_value=2.0,
+                value=float(defaults.min_expected_roi),
+                step=0.05,
+                format="%.0f%%",
+                help="Customers below this are downgraded to Do Not Target.",
+            )
 
-    st.sidebar.markdown("### Targeting thresholds")
-    st.sidebar.caption("These filter the plan; they do not change any recommendation.")
-    value_threshold = st.sidebar.slider(
-        "Minimum expected future revenue",
-        min_value=0.0,
-        max_value=2000.0,
-        value=0.0,
-        step=50.0,
-    )
-    risk_threshold = st.sidebar.slider(
-        "Minimum churn probability",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.0,
-        step=0.05,
-        format="%.0f%%",
-    )
+        st.markdown("")
+        st.markdown("**Targeting thresholds** — these filter the plan, they change no recommendation")
+        left, right, _, _ = st.columns(4, gap="medium")
+        with left:
+            value_threshold = st.slider(
+                "Minimum expected future revenue",
+                min_value=0.0,
+                max_value=2000.0,
+                value=0.0,
+                step=50.0,
+            )
+        with right:
+            risk_threshold = st.slider(
+                "Minimum churn probability",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.0,
+                step=0.05,
+                format="%.0f%%",
+            )
 
     return {
         "propensity": propensity,

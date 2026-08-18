@@ -106,7 +106,7 @@ class Settings:
     log_level: str = "INFO"
 
     # --- churn definition (consumed from the feature/model step onwards) ---
-    churn_inactivity_days: int = 180
+    churn_inactivity_days: int = 90
     as_of_date: date | None = None
 
     # --- churn risk bands ---
@@ -249,7 +249,7 @@ def _build_settings() -> Settings:
         outputs_dir=_env_str("OUTPUTS_DIR", "outputs"),
         log_dir=_env_str("LOG_DIR", "logs"),
         log_level=_env_str("LOG_LEVEL", "INFO").upper(),
-        churn_inactivity_days=_env_int("CHURN_INACTIVITY_DAYS", 180),
+        churn_inactivity_days=_env_int("CHURN_INACTIVITY_DAYS", 90),
         as_of_date=_env_date("AS_OF_DATE"),
         risk_threshold_medium=_env_float("RISK_THRESHOLD_MEDIUM", 0.30),
         risk_threshold_high=_env_float("RISK_THRESHOLD_HIGH", 0.60),

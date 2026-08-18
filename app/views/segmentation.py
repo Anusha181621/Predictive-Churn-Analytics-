@@ -57,7 +57,10 @@ def render() -> None:
 
     frame, _ = render_filters(master, namespace="seg")
     if frame.empty:
-        st.warning("No customers match the current filters. Clear one to see results.")
+        st.warning(
+            "No customers match the current filters. Use **Clear all** above, or open "
+            "**Filters** and widen one."
+        )
         return
 
     flags = [c for c in SEGMENT_FLAG_COLUMNS if c in frame.columns]

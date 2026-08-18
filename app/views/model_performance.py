@@ -24,7 +24,7 @@ from app.charts.model import (
 )
 from app.components.kpi import Kpi, kpi_row
 from app.components.layout import chart_card, page_header, section
-from app.components.tables import data_table
+from app.components.tables import data_table, download_button
 from app.data_access import (
     load_customer_master,
     load_global_importance,
@@ -206,14 +206,14 @@ def _importance(metrics: dict) -> None:
 def _shap() -> None:
     if missing("shap_importance", "shap_summary"):
         st.info(
-            "SHAP artefacts are not present. Run `python scripts/explain.py` to generate the "
-            "global explainability outputs."
+            "The churn driver analysis has not been produced yet, so this section is empty. "
+            "It appears once the next analysis refresh runs."
         )
         return
 
     section(
-        "SHAP summary",
-        "Written as data rather than images so it can be sorted, filtered and read here rather "
+        "What drives churn across the book",
+        "Held as data rather than images so it can be sorted, filtered and read here rather "
         "than squinted at.",
     )
 
@@ -254,7 +254,7 @@ def _shap() -> None:
 
     summary = load_shap_summary()
     present = [c for c in SHAP_TABLE_COLUMNS if c in summary.columns]
-    st.markdown("**Per-feature SHAP summary**")
+    st.markdown("**Every driver, ranked**")
     st.dataframe(
         summary[present].sort_values("rank"),
         column_config={
@@ -270,18 +270,11 @@ def _shap() -> None:
         width="stretch",
         height=320,
     )
-    st.download_button(
-        "Download shap_summary.csv",
-        data=summary.to_csv(index=False).encode("utf-8-sig"),
-        file_name="shap_summary.csv",
-        mime="text/csv",
-        key="mp_shap_dl",
-        width="content",
-    )
+    download_button(summary, "churn_driver_summary.csv", key="mp_shap_dl")
     st.caption(
-        "Contributions are on the model's uncalibrated log-odds scale. Calibration is monotone, "
-        "so ranking and direction carry over to the reported probability exactly; the magnitudes "
-        "do not sum to it."
+        "Contributions are measured before the probabilities are calibrated. Calibration is "
+        "monotone, so ranking and direction carry over to the reported probability exactly; the "
+        "magnitudes do not sum to it."
     )
 
 

@@ -36,6 +36,9 @@ __all__ = ["ShapResult", "compute_shap_values", "unwrap_pipeline"]
 
 logger = get_logger(__name__)
 
+#: Prefix ``SimpleImputer(add_indicator=True)`` gives the "this value was missing" columns it adds.
+MISSING_INDICATOR_PREFIX = "missingindicator_"
+
 
 def unwrap_pipeline(model: Any) -> tuple[Any, Any]:
     """Peel calibration/freezing wrappers off and return ``(preprocessor, tree_model)``.
@@ -70,15 +73,27 @@ def _map_expanded_to_original(
     Numeric columns pass through with their own name; ``OneHotEncoder`` emits
     ``<column>_<category>``. Longest-prefix matching handles both, and preferring the longest match
     stops ``category`` from claiming ``category_diversity``'s columns.
+
+    ``SimpleImputer(add_indicator=True)`` is the third case, and the one that bites: it appends
+    ``missingindicator_<column>`` for every column that had a gap. The prefix is on the *front*, so
+    plain prefix matching cannot see it, and an unmatched column is dropped when the folded frame is
+    reindexed onto the original features -- silently deleting real explanation mass. The flag is a
+    statement about its source column ("we did not know this value"), so its contribution belongs
+    there.
     """
     by_length = sorted(original, key=len, reverse=True)
+
+    def match(name: str) -> str | None:
+        if name in original:
+            return name
+        return next((column for column in by_length if name.startswith(f"{column}_")), None)
+
     mapping: dict[str, str] = {}
     for name in expanded:
-        if name in original:
-            mapping[name] = name
-            continue
-        match = next((column for column in by_length if name.startswith(f"{column}_")), None)
-        mapping[name] = match if match is not None else name
+        target = match(name)
+        if target is None and name.startswith(MISSING_INDICATOR_PREFIX):
+            target = match(name[len(MISSING_INDICATOR_PREFIX) :])
+        mapping[name] = target if target is not None else name
     return mapping
 
 
@@ -165,6 +180,16 @@ def compute_shap_values(
     # Additivity is what makes this fold valid: a feature's total contribution is the sum of its
     # one-hot columns' contributions.
     contributions = expanded.T.groupby(pd.Series(mapping)).sum().T
+    # Anything the mapping could not place would be dropped by the reindex below without a trace,
+    # which is exactly how the missing-indicator columns went unnoticed. Say so instead.
+    unplaced = [column for column in contributions.columns if column not in set(original)]
+    if unplaced:
+        logger.warning(
+            "SHAP: %d transformed column(s) could not be folded onto a source feature and their "
+            "contribution is being discarded, so the explanations no longer sum to the margin: %s",
+            len(unplaced),
+            ", ".join(unplaced[:10]),
+        )
     contributions = contributions.reindex(columns=original, fill_value=0.0)
 
     values = matrix.copy()

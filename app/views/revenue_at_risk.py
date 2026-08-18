@@ -1,14 +1,14 @@
 """Revenue at Risk -- the money behind the probabilities.
 
 Revenue at risk is ``churn probability × expected future revenue``, computed per customer and then
-summed. Expected future revenue is a frequency × value projection over the same 180-day horizon
-the churn probability describes: mixing a 180-day probability with an annual revenue figure would
-overstate the exposure roughly twofold.
+summed. Expected future revenue is a frequency × value projection over the same horizon the churn
+probability describes -- ``CHURN_INACTIVITY_DAYS`` -- because mixing a 90-day probability with an
+annual revenue figure would overstate the exposure roughly fourfold.
 
 Two guards in that projection are worth knowing when reading these totals. The rate denominator is
-floored at 180 days and every projection is capped at twice observed lifetime revenue, so a
-customer with one large order and three weeks of history cannot be extrapolated into the most
-valuable account in the book.
+floored at 180 days (a separate setting, and deliberately longer than the churn horizon) and every
+projection is capped at twice observed lifetime revenue, so a customer with one large order and
+three weeks of history cannot be extrapolated into the most valuable account in the book.
 """
 
 from __future__ import annotations
@@ -16,12 +16,12 @@ from __future__ import annotations
 import streamlit as st
 
 from app.charts.breakdowns import measure_by_group
-from app.components.filters import filter_caption, render_filters
+from app.components.filters import render_filters
 from app.components.kpi import Kpi, hero, kpi_row
 from app.components.layout import chart_card, page_header, section
 from app.components.tables import data_table
 from app.data_access import load_customer_master, prediction_date, require
-from app.formatting import integer, money, money_compact, percent
+from app.formatting import horizon_phrase, integer, money, money_compact, percent
 from app.theme import RISK_COLOURS, RISK_ORDER
 
 TABLE_COLUMNS = [
@@ -51,9 +51,12 @@ def render() -> None:
         as_of=as_of,
     )
 
-    frame, selections = render_filters(master, namespace="rar")
+    frame, _ = render_filters(master, namespace="rar")
     if frame.empty:
-        st.warning("No customers match the current filters. Clear one to see results.")
+        st.warning(
+            "No customers match the current filters. Use **Clear all** above, or open "
+            "**Filters** and widen one."
+        )
         return
 
     exposure = float(frame["revenue_at_risk"].sum())
@@ -65,8 +68,7 @@ def render() -> None:
     hero(
         "Total revenue at risk",
         money(exposure),
-        f"{filter_caption(selections)} · {percent(exposure / book) if book else '—'} of the "
-        f"{money(book)} across the whole book",
+        f"{percent(exposure / book) if book else '—'} of the {money(book)} across the whole book",
     )
     st.markdown("")
 
@@ -75,7 +77,7 @@ def render() -> None:
             Kpi(
                 "Expected future revenue",
                 money_compact(expected),
-                "Projected over the next 180 days",
+                f"Projected over the {horizon_phrase()}",
             ),
             Kpi(
                 "Share at risk",
