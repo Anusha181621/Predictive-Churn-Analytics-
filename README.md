@@ -744,8 +744,9 @@ required.** Real environment variables take precedence over the file.
 | `RISK_THRESHOLD_CRITICAL` | `0.80` | High / Critical boundary |
 | `RANDOM_SEED` | `42` | Reproducibility |
 | `CURRENCY` | `EUR` | Display currency |
-| `ANTHROPIC_API_KEY` | *(blank)* | Switches on the [Ask the Data](#ask-the-data--the-ai-analyst) assistant. Blank leaves it off and changes nothing else |
-| `ASSISTANT_MODEL` | `claude-opus-5` | Model the assistant uses |
+| `OPENAI_API_KEY` | *(blank)* | Switches on the [Ask the Data](#ask-the-data--the-ai-analyst) assistant. Blank leaves it off and changes nothing else |
+| `ASSISTANT_MODEL` | `gpt-4o` | Model the assistant uses |
+| `ASSISTANT_BASE_URL` | *(blank)* | Blank talks to OpenAI. Set it for any OpenAI-compatible gateway (OpenRouter, Azure, a local server) |
 
 ```python
 from src.config.settings import get_settings
@@ -1065,14 +1066,14 @@ as chips beside the match count. The sidebar carries navigation and nothing else
 ### Ask the Data — the AI analyst
 
 The other eight pages answer questions somebody thought to build a page for. This one answers the
-rest: ask in plain language and a Claude agent queries the same artefacts the pages render.
+rest: ask in plain language and an LLM agent queries the same artefacts the pages render.
 
-**It is optional and off by default.** Set `ANTHROPIC_API_KEY` in `.env` to switch it on. Without
+**It is optional and off by default.** Set `OPENAI_API_KEY` in `.env` to switch it on. Without
 it every other page is unaffected and this one says it has not been configured — the platform's
 guarantee that it runs locally against four CSV files does not depend on a network connection.
 
 **The pipeline never calls out.** `tests/test_architecture.py` asserts that nothing under `src/`
-imports an outbound client, and that `anthropic` is imported by exactly one module. Features,
+imports an outbound client, and that `openai` is imported by exactly one module. Features,
 churn probabilities, explanations and retention economics are computed exactly as before; the
 assistant only reads what they produced, and cannot change a figure.
 
@@ -1086,8 +1087,19 @@ probability rather than a verdict on an individual, and that questions the data 
 marketing spend, campaign history, web analytics — are declined rather than answered with an
 invented number.
 
-Cost is roughly a few cents per question against `claude-opus-5` (configurable via
-`ASSISTANT_MODEL`); a question typically spends 5–15k input and 0.5–1.5k output tokens.
+**The provider is one file.** The tools carry no provider types at all, so
+[`agent.py`](app/assistant/agent.py) is the whole surface: the client, the system prompt, the tool
+loop and the error translation. It speaks the chat-completions API, which means `ASSISTANT_BASE_URL`
+is enough to point it at any compatible gateway without a code change — only the URL and the model
+id differ. A question typically spends 5–15k input and 0.5–1.5k output tokens, a few cents at
+`gpt-4o` rates.
+
+Measured behaviour, against the shipped artefacts: "compare churn risk across acquisition channels"
+calls `aggregate` and returns the real per-channel figures; "top 3 by revenue at risk, and what
+should we do about the first one" chains `book_summary` → `rank_customers` → `customer_detail`;
+"how good is the model, really?" quotes accuracy against the majority-class baseline *and* passes on
+the caveat that its ranking only ties a single-feature heuristic; "how much would we retain" labels
+the figure as assumption-dependent; "what was our marketing spend?" is declined without a tool call.
 
 ### One name for revenue at risk
 

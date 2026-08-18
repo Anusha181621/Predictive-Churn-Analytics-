@@ -123,8 +123,12 @@ class Settings:
     #: misconfiguration: without it the platform behaves exactly as it always has and the
     #: assistant page says it is not configured. Nothing under ``src/`` reads this -- the
     #: pipeline that produces every number stays entirely offline.
-    anthropic_api_key: str | None = None
-    assistant_model: str = "claude-opus-5"
+    openai_api_key: str | None = None
+    assistant_model: str = "gpt-4o"
+    #: Optional OpenAI-compatible endpoint. Blank means OpenAI itself. Set it to reach a gateway
+    #: that speaks the same API -- OpenRouter, Azure OpenAI, a local server -- without any code
+    #: change, since only the base URL and the model id differ.
+    assistant_base_url: str | None = None
 
     # Populated in __post_init__; not read from the environment.
     table_files: dict[str, str] = field(default_factory=dict, repr=False)
@@ -264,8 +268,9 @@ def _build_settings() -> Settings:
         risk_threshold_critical=_env_float("RISK_THRESHOLD_CRITICAL", 0.80),
         random_seed=_env_int("RANDOM_SEED", 42),
         currency=_env_str("CURRENCY", "EUR"),
-        anthropic_api_key=_env_str("ANTHROPIC_API_KEY", "") or None,
-        assistant_model=_env_str("ASSISTANT_MODEL", "claude-opus-5"),
+        openai_api_key=_env_str("OPENAI_API_KEY", "") or None,
+        assistant_model=_env_str("ASSISTANT_MODEL", "gpt-4o"),
+        assistant_base_url=_env_str("ASSISTANT_BASE_URL", "") or None,
     )
 
 

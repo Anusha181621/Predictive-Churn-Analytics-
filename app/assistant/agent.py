@@ -1,9 +1,9 @@
-"""The Claude wiring for the "Ask the Data" assistant.
+"""The OpenAI wiring for the "Ask the Data" assistant.
 
-This is the only module in the project that imports ``anthropic``, and it is deliberately thin.
+This is the only module in the project that imports ``openai``, and it is deliberately thin.
 Everything the assistant can actually *do* lives in :mod:`app.assistant.tools`, which is plain
-pandas and is tested without a network call. What is here is the loop, the grounding rules, and
-the translation of SDK failures into sentences a business user can act on.
+pandas with no provider types in it at all -- that separation is what made swapping the model
+provider a change to this one file rather than to the feature.
 
 **The key is optional.** :func:`assistant_available` reports whether one is configured, and every
 caller checks it first. Without a key the dashboard behaves exactly as it always has -- the
@@ -11,19 +11,19 @@ platform's guarantee that it runs locally against four CSV files is not weakened
 turns itself off when unconfigured.
 
 **The model never supplies a number.** The system prompt below is not decoration; it is the
-mechanism that makes an answer checkable. Claude decides which questions to ask of the data and how
-to word the reply, and the figures come back from tool calls against the same master frame the
+mechanism that makes an answer checkable. The model chooses which questions to ask of the data and
+how to word the reply, and the figures come back from tool calls against the same master frame the
 pages render. An answer and the dashboard cannot disagree, because they read the same rows.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-import anthropic
-from anthropic import beta_tool
+import openai
 
 from app.assistant import tools as tool_module
 from src.config.settings import get_settings
@@ -33,10 +33,11 @@ __all__ = [
     "ToolCall",
     "assistant_available",
     "answer",
-    "build_tools",
+    "stream_answer",
     "system_prompt",
     "EXAMPLE_QUESTIONS",
     "NOT_CONFIGURED",
+    "MAX_ITERATIONS",
 ]
 
 #: Shown wherever the assistant would be offered but no key is configured. Deliberately free of
@@ -58,15 +59,15 @@ EXAMPLE_QUESTIONS = (
 #: Enough room for a long answer with several tool round-trips behind it.
 MAX_TOKENS = 16000
 
-#: Ceiling on tool round-trips in a single answer. Generous for real questions — the longest
-#: sensible chain is aggregate, rank, then a handful of lookups — and a backstop against a
+#: Ceiling on tool round-trips in a single answer. Generous for real questions -- the longest
+#: sensible chain is aggregate, rank, then a handful of lookups -- and a backstop against a
 #: question that sends the model round in circles at the user's expense.
 MAX_ITERATIONS = 12
 
 
 def assistant_available() -> bool:
     """Whether an API key is configured. Callers must check this before :func:`answer`."""
-    return bool(get_settings().anthropic_api_key)
+    return bool(get_settings().openai_api_key)
 
 
 def system_prompt() -> str:
@@ -137,19 +138,18 @@ class AssistantReply:
     error: str | None = None
 
 
-def build_tools() -> list[Any]:
-    """Wrap the plain tool functions as Claude tools.
+def _client() -> openai.OpenAI:
+    """The chat client.
 
-    ``beta_tool`` builds each schema from the function's signature and docstring, so the
-    description Claude reads and the code that runs are the same artefact and cannot drift apart.
-    The wrapping happens here rather than in ``tools.py`` so that module stays importable — and
-    testable — without the SDK.
+    ``base_url`` is passed only when configured, so the default path is plain OpenAI. Set it and
+    the same code talks to any OpenAI-compatible endpoint — a gateway such as OpenRouter, Azure, or
+    a local server — because only the URL and the model id differ, not the request shape.
     """
-    return [beta_tool(function) for function in tool_module.TOOL_FUNCTIONS]
-
-
-def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=get_settings().anthropic_api_key)
+    settings = get_settings()
+    return openai.OpenAI(
+        api_key=settings.openai_api_key,
+        **({"base_url": settings.assistant_base_url} if settings.assistant_base_url else {}),
+    )
 
 
 def _explain(error: Exception) -> str:
@@ -158,31 +158,60 @@ def _explain(error: Exception) -> str:
     Most specific first. A single "something went wrong" would leave a reader unable to tell an
     expired key from a dropped connection, which are fixed by completely different people.
     """
-    if isinstance(error, anthropic.AuthenticationError):
-        return "The configured API key was rejected. Check `ANTHROPIC_API_KEY` in `.env`."
-    if isinstance(error, anthropic.PermissionDeniedError):
+    if isinstance(error, openai.AuthenticationError):
+        return "The configured API key was rejected. Check the assistant key in the configuration."
+    if isinstance(error, openai.PermissionDeniedError):
         return "The configured API key is not permitted to use this model."
-    if isinstance(error, anthropic.NotFoundError):
-        return "The configured assistant model does not exist. Check `ASSISTANT_MODEL` in `.env`."
-    if isinstance(error, anthropic.RateLimitError):
-        return "Too many questions at once. Wait a moment and ask again."
-    if isinstance(error, anthropic.APIConnectionError):
+    if isinstance(error, openai.NotFoundError):
+        return "The configured assistant model does not exist. Check the model name in `.env`."
+    if isinstance(error, openai.RateLimitError):
+        return "Too many questions at once, or the account is out of quota. Try again shortly."
+    if isinstance(error, openai.APITimeoutError):
+        return "The assistant took too long to answer. Try a narrower question."
+    if isinstance(error, openai.APIConnectionError):
         return "Could not reach the assistant service. Check the network connection."
-    if isinstance(error, anthropic.APIStatusError):
+    if isinstance(error, openai.APIStatusError):
         if error.status_code >= 500:
             return "The assistant service is having trouble. Try again shortly."
         return f"The assistant could not process that request ({error.status_code})."
     return "The assistant hit an unexpected problem and could not answer."
 
 
-def _messages(history: list[dict[str, str]], question: str) -> list[dict[str, str]]:
-    """Prior turns plus the new question.
+def _assistant_turn(message: Any) -> dict[str, Any]:
+    """The model's own turn, in the shape it has to be replayed as.
 
-    Only the user questions and the final answers are replayed — not the tool traffic behind them.
-    Each turn re-queries the data it needs, which keeps the context small and, more importantly,
-    stops a stale figure from an earlier turn being reused after the artefacts are regenerated.
+    Built explicitly rather than by dumping the response object: the API rejects some of the null
+    fields a full dump carries, and a tool call must be echoed back with the same id it arrived
+    with or the tool results that follow cannot be matched to it.
     """
-    return [*history, {"role": "user", "content": question}]
+    turn: dict[str, Any] = {"role": "assistant", "content": message.content or ""}
+    if getattr(message, "tool_calls", None):
+        turn["tool_calls"] = [
+            {
+                "id": call.id,
+                "type": "function",
+                "function": {
+                    "name": call.function.name,
+                    "arguments": call.function.arguments,
+                },
+            }
+            for call in message.tool_calls
+        ]
+    return turn
+
+
+def _arguments(call: Any) -> dict[str, Any]:
+    """Parse a tool call's arguments.
+
+    Always through ``json.loads`` -- the arguments arrive as a JSON *string*, and its escaping is
+    the model's business, not ours. Malformed JSON becomes an empty call, which the tool answers
+    with a message about what it expected instead of raising.
+    """
+    try:
+        parsed = json.loads(call.function.arguments or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def stream_answer(
@@ -193,45 +222,67 @@ def stream_answer(
     Yielding the tool calls is what lets the page show its working while the answer is still being
     assembled. The final item is always an :class:`AssistantReply`, carrying either the answer or a
     readable error.
+
+    Only the prior questions and answers are replayed -- not the tool traffic behind them. Each
+    turn re-queries the data it needs, which keeps the conversation small and, more importantly,
+    stops a figure quoted before the artefacts were regenerated from being reused after.
     """
     settings = get_settings()
-    if not settings.anthropic_api_key:
+    if not settings.openai_api_key:
         yield AssistantReply(text=NOT_CONFIGURED, error="not_configured")
         return
 
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt()},
+        *(history or []),
+        {"role": "user", "content": question},
+    ]
     calls: list[ToolCall] = []
-    text_blocks: list[str] = []
 
     try:
-        runner = _client().beta.messages.tool_runner(
-            model=settings.assistant_model,
-            max_tokens=MAX_TOKENS,
-            thinking={"type": "adaptive"},
-            system=system_prompt(),
-            tools=build_tools(),
-            max_iterations=MAX_ITERATIONS,
-            # The prompt and the six tool schemas are byte-identical on every request, so they
-            # are worth caching across the turns of a conversation. Caching needs a prefix of
-            # about a thousand tokens to engage and is silently skipped below that -- if this is
-            # ever tuned, check `usage.cache_read_input_tokens` rather than assuming it took.
-            cache_control={"type": "ephemeral"},
-            messages=_messages(list(history or []), question),
-        )
-        for message in runner:
-            for block in message.content:
-                if block.type == "tool_use":
-                    call = ToolCall(name=block.name, arguments=dict(block.input or {}))
-                    calls.append(call)
-                    yield call
-                elif block.type == "text" and block.text.strip():
-                    text_blocks.append(block.text.strip())
+        client = _client()
+        for _ in range(MAX_ITERATIONS):
+            response = client.chat.completions.create(
+                model=settings.assistant_model,
+                messages=messages,
+                tools=tool_module.TOOL_SCHEMAS,
+                max_completion_tokens=MAX_TOKENS,
+            )
+            message = response.choices[0].message
+            messages.append(_assistant_turn(message))
+
+            requested = getattr(message, "tool_calls", None)
+            if not requested:
+                yield AssistantReply(text=(message.content or "").strip(), tool_calls=calls)
+                return
+
+            for call in requested:
+                arguments = _arguments(call)
+                record = ToolCall(name=call.function.name, arguments=arguments)
+                calls.append(record)
+                yield record
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": tool_module.dispatch(call.function.name, arguments),
+                    }
+                )
     except Exception as error:  # noqa: BLE001 - every failure becomes a readable sentence
         yield AssistantReply(text=_explain(error), tool_calls=calls, error=type(error).__name__)
         return
 
-    # Only the final turn's text is the answer. Earlier turns are narration between tool calls
-    # ("let me check the segments"), and replaying them would read as a stream of consciousness.
-    yield AssistantReply(text=text_blocks[-1] if text_blocks else "", tool_calls=calls)
+    # The loop ran out of turns with the model still calling tools. Saying so is better than
+    # presenting whatever half-finished text happens to be last -- a truncated answer that looks
+    # complete is worse than no answer.
+    yield AssistantReply(
+        text=(
+            "That question needed more steps than the assistant is allowed to take in one go. "
+            "Try asking it in smaller parts."
+        ),
+        tool_calls=calls,
+        error="max_iterations",
+    )
 
 
 def answer(question: str, history: list[dict[str, str]] | None = None) -> AssistantReply:

@@ -6,13 +6,16 @@ here, thoroughly and entirely offline — no API key, no network, no model. If a
 wrong rows, no amount of good prompting saves the answer; if it returns the right rows, the answer
 is checkable against the dashboard.
 
-The model layer gets two narrower tests: that a scripted tool-use response actually drives the
-loop, and that the whole feature turns itself off cleanly when no key is configured. Neither
-touches the network.
+The agent layer is tested by replacing the HTTP call and keeping everything else real: the loop,
+the tool dispatch, the replay of a tool call and its result, the iteration cap and the error
+translation are all ours, so all of them are exercised against a scripted conversation. Nothing
+here touches the network or spends a key.
 """
 
 from __future__ import annotations
 
+import copy
+import inspect
 import json
 
 import pytest
@@ -232,7 +235,7 @@ def test_model_summary_quotes_accuracy_against_its_baseline() -> None:
 def test_the_assistant_is_off_when_no_key_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.assistant import agent
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
     get_settings(refresh=True)
 
     assert agent.assistant_available() is False
@@ -247,7 +250,7 @@ def test_an_unconfigured_answer_never_reaches_the_network(
     """The check has to happen before the client is built, not inside a try/except."""
     from app.assistant import agent
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
     get_settings(refresh=True)
 
     def explode() -> None:  # pragma: no cover - the point is that it is never called
@@ -257,73 +260,157 @@ def test_an_unconfigured_answer_never_reaches_the_network(
     assert agent.answer("anything at all").error == "not_configured"
 
 
-def test_the_tool_schemas_are_built_from_the_functions_themselves() -> None:
-    """The description Claude reads and the code that runs must be one artefact, not two."""
-    from app.assistant import agent
+def test_every_tool_has_exactly_one_declaration() -> None:
+    """A callable with no declaration is unreachable; a declaration with no callable is a 404.
 
-    built = agent.build_tools()
-    assert len(built) == len(tools.TOOL_FUNCTIONS)
-
-    names = {t.to_dict()["name"] for t in built}
-    assert names == {f.__name__ for f in tools.TOOL_FUNCTIONS}
-
-    by_name = {t.to_dict()["name"]: t.to_dict() for t in built}
-    ranking = by_name["rank_customers"]["input_schema"]["properties"]
-    assert {"order_by", "limit", "risk_level", "segment"} <= set(ranking)
-    assert by_name["customer_detail"]["input_schema"]["required"] == ["customer_id"]
+    The schemas are prompt text -- how the model decides which tool answers a question -- so they
+    are written out by hand rather than generated. This is what stops them drifting from the code.
+    """
+    declared = [schema["function"]["name"] for schema in tools.TOOL_SCHEMAS]
+    assert sorted(declared) == sorted(tools.TOOLS_BY_NAME)
+    assert len(declared) == len(set(declared)), "a tool is declared twice"
 
 
-def test_tool_calls_are_surfaced_and_the_final_turn_is_the_answer(
+def test_no_declaration_offers_a_parameter_the_function_cannot_accept() -> None:
+    """The model can only pass what the schema advertises, so the schema must not over-promise."""
+    for schema in tools.TOOL_SCHEMAS:
+        function = tools.TOOLS_BY_NAME[schema["function"]["name"]]
+        parameters = inspect.signature(function).parameters
+        offered = set(schema["function"]["parameters"]["properties"])
+        assert offered <= set(parameters), (
+            f"{function.__name__} is offered {sorted(offered - set(parameters))}, "
+            "which it cannot accept"
+        )
+
+        required = set(schema["function"]["parameters"].get("required", []))
+        mandatory = {
+            name
+            for name, parameter in parameters.items()
+            if parameter.default is inspect.Parameter.empty
+        }
+        assert mandatory <= required, (
+            f"{function.__name__} needs {sorted(mandatory - required)} but does not require it"
+        )
+
+
+def test_every_declaration_describes_itself() -> None:
+    """A tool with a thin description gets called for the wrong questions."""
+    for schema in tools.TOOL_SCHEMAS:
+        description = schema["function"]["description"]
+        assert len(description) > 60, f"{schema['function']['name']} is barely described"
+
+
+@requires_artefacts
+def test_dispatch_runs_the_named_tool() -> None:
+    assert _parsed(tools.dispatch("aggregate", {"dimension": "risk_level"}))["dimension"] == (
+        "risk_level"
+    )
+
+
+def test_dispatch_turns_a_bad_call_into_a_tool_result() -> None:
+    """A raised exception abandons the answer. A message lets the model fix its own mistake."""
+    unknown = _parsed(tools.dispatch("summon_a_dragon", {}))
+    assert "error" in unknown
+    assert unknown["available"], "the error does not tell the model what it may call instead"
+
+    wrong_arguments = _parsed(tools.dispatch("aggregate", {"nonsense": 1}))
+    assert "error" in wrong_arguments
+
+
+def test_tool_calls_are_surfaced_and_the_last_turn_is_the_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Drive the agent with a scripted conversation instead of a model. No network, no key spent.
+    """Drive the loop with a scripted conversation instead of a model. No network, no key spent.
 
-    Scope, stated plainly: the stub stands in for the SDK, so *it* does not execute the tools —
-    the real runner does that, and the tools themselves are tested directly above. What is checked
-    here is the wiring around the runner: that a tool call reaches the caller so the page can show
-    its working, and that the answer returned is the final turn's text rather than the narration
-    the model wrote before the tool ran ("Let me check the book.").
+    Scope, stated plainly: the stub replaces the HTTP call, not the loop -- the loop under test is
+    ours, so this does exercise the real tool dispatch, the real echoing of a tool call back with
+    its id, and the real decision about when to stop. Two turns, mirroring a real exchange: the
+    model asks for a tool, then answers from the result.
     """
     from app.assistant import agent
 
-    class Block:
-        def __init__(self, **fields: object) -> None:
-            self.__dict__.update(fields)
-
-    class Message:
-        def __init__(self, content: list[Block]) -> None:
-            self.content = content
-
-    scripted = [
-        Message(
-            [
-                Block(type="text", text="Let me check the book."),
-                Block(type="tool_use", name="book_summary", input={}, id="t1"),
-            ]
-        ),
-        Message([Block(type="text", text="There are 1,000 customers.")]),
-    ]
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
     get_settings(refresh=True)
-    stub = _StubClient(scripted)
+
+    stub = _StubClient(
+        [
+            _Message("Let me check the book.", [_Call("c1", "book_summary", "{}")]),
+            _Message("There are 1,000 customers."),
+        ]
+    )
     monkeypatch.setattr(agent, "_client", lambda: stub)
     events = list(agent.stream_answer("how many customers are there?"))
 
-    # The request must carry the grounding rules and the whole tool surface, or the answer would
-    # be ungrounded however well the loop is wired.
-    assert "Every figure you state must come from a tool call" in stub.recorded["system"]
-    assert len(stub.recorded["tools"]) == len(tools.TOOL_FUNCTIONS)
-    assert stub.recorded["max_iterations"] == agent.MAX_ITERATIONS
-
-    calls = [e for e in events if isinstance(e, agent.ToolCall)]
+    calls = [event for event in events if isinstance(event, agent.ToolCall)]
     reply = events[-1]
 
-    assert [c.name for c in calls] == ["book_summary"]
+    assert [call.name for call in calls] == ["book_summary"]
     assert isinstance(reply, agent.AssistantReply)
     assert reply.error is None
+    # The narration written before the tool ran is not the answer.
     assert reply.text == "There are 1,000 customers."
-    assert [c.name for c in reply.tool_calls] == ["book_summary"]
+
+    # The request must carry the grounding rules and the whole tool surface, or the answer would be
+    # ungrounded however well the loop is wired.
+    first = stub.requests[0]
+    assert first["messages"][0]["role"] == "system"
+    assert "Every figure you state must come from a tool call" in first["messages"][0]["content"]
+    assert len(first["tools"]) == len(tools.TOOL_SCHEMAS)
+
+    # The second request has to replay the assistant's tool call and its result, keyed by the same
+    # id. Without that the provider rejects the turn, and the model loses what it just learned.
+    replayed = stub.requests[1]["messages"]
+    assert replayed[-2]["tool_calls"][0]["id"] == "c1"
+    assert replayed[-1]["role"] == "tool"
+    assert replayed[-1]["tool_call_id"] == "c1"
+    assert replayed[-1]["content"], "the tool result was replayed empty"
+
+
+def test_a_runaway_conversation_stops_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model that keeps calling tools must not spend the user's money indefinitely.
+
+    Reporting the cap is the honest outcome: presenting the last half-finished text instead would
+    hand back a truncated answer that looks complete.
+    """
+    from app.assistant import agent
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    get_settings(refresh=True)
+
+    forever = [
+        _Message("still looking", [_Call(f"c{index}", "book_summary", "{}")]) for index in range(50)
+    ]
+    stub = _StubClient(forever)
+    monkeypatch.setattr(agent, "_client", lambda: stub)
+    reply = agent.answer("go round in circles please")
+
+    assert reply.error == "max_iterations"
+    assert len(stub.requests) == agent.MAX_ITERATIONS
+    assert "smaller parts" in reply.text
+
+
+def test_malformed_tool_arguments_do_not_crash_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Arguments arrive as a JSON string the model wrote. It is entitled to get that wrong."""
+    from app.assistant import agent
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    get_settings(refresh=True)
+
+    stub = _StubClient(
+        [
+            _Message("", [_Call("c1", "aggregate", "{not valid json")]),
+            _Message("I could not read that."),
+        ]
+    )
+    monkeypatch.setattr(agent, "_client", lambda: stub)
+    reply = agent.answer("break the parser")
+
+    assert reply.error is None
+    assert reply.text == "I could not read that."
+    # An unparseable call becomes an empty one, and the tool answers with what it expected instead.
+    assert json.loads(stub.requests[1]["messages"][-1]["content"])["error"]
 
 
 def test_an_sdk_failure_becomes_a_sentence_not_a_traceback(
@@ -331,7 +418,7 @@ def test_an_sdk_failure_becomes_a_sentence_not_a_traceback(
 ) -> None:
     from app.assistant import agent
 
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
     get_settings(refresh=True)
 
     def failing() -> None:
@@ -345,21 +432,62 @@ def test_an_sdk_failure_becomes_a_sentence_not_a_traceback(
     assert reply.text.endswith(".")
 
 
-class _StubClient:
-    """Stands in for ``anthropic.Anthropic``, yielding a scripted conversation.
+def test_a_custom_endpoint_is_only_passed_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same code talks to OpenAI or to any compatible gateway; only the URL differs."""
+    from app.assistant import agent
 
-    ``recorded`` keeps the request keyword arguments so a test can assert what was actually sent.
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key-not-real")
+    monkeypatch.setenv("ASSISTANT_BASE_URL", "")
+    get_settings(refresh=True)
+    assert get_settings().assistant_base_url is None
+    assert str(agent._client().base_url).startswith("https://api.openai.com")
+
+    monkeypatch.setenv("ASSISTANT_BASE_URL", "https://openrouter.ai/api/v1")
+    get_settings(refresh=True)
+    assert str(agent._client().base_url).startswith("https://openrouter.ai")
+
+
+# --------------------------------------------------------------------------------------
+# the stub: a chat client that replays a scripted conversation
+# --------------------------------------------------------------------------------------
+
+
+class _Call:
+    """A tool call, in the shape the chat API returns one."""
+
+    def __init__(self, call_id: str, name: str, arguments: str) -> None:
+        self.id = call_id
+        self.type = "function"
+        self.function = type("_Function", (), {"name": name, "arguments": arguments})()
+
+
+class _Message:
+    def __init__(self, content: str, tool_calls: list[_Call] | None = None) -> None:
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _StubClient:
+    """Stands in for ``openai.OpenAI``, replaying scripted responses.
+
+    It replaces only the HTTP call. The tool loop, the dispatch and the message replay are the real
+    implementation, which is the part worth testing. ``requests`` keeps every set of keyword
+    arguments sent, so a test can assert what actually went over the wire.
     """
 
-    def __init__(self, messages: list[object]) -> None:
-        self._messages = messages
-        self.recorded: dict = {}
-        self.beta = self
+    def __init__(self, messages: list[_Message]) -> None:
+        self._messages = list(messages)
+        self.requests: list[dict] = []
+        self.chat = self
+        self.completions = self
 
-    def tool_runner(self, **kwargs: object) -> list[object]:
-        self.recorded.update(kwargs)
-        return self._messages
-
-    @property
-    def messages(self) -> "_StubClient":
-        return self
+    def create(self, **kwargs: object) -> object:
+        # Deep-copy the messages: the agent mutates its own list as the loop proceeds, and a shared
+        # reference would make every recorded request look identical to the last one.
+        self.requests.append({**kwargs, "messages": copy.deepcopy(kwargs["messages"])})
+        message = self._messages.pop(0)
+        return type(
+            "_Response", (), {"choices": [type("_Choice", (), {"message": message})()]}
+        )()

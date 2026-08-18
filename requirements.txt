@@ -28,10 +28,10 @@ streamlit>=1.40,<2
 plotly>=5.24,<7
 
 # --- AI assistant (optional) ---
-# Only the dashboard's "Ask the Data" page imports this. Without ANTHROPIC_API_KEY the
+# Only the dashboard's "Ask the Data" page imports this. Without OPENAI_API_KEY the
 # page reports that it is not configured and every other page is unaffected, so the
 # platform still runs end to end with no network access at all.
-anthropic>=0.116
+openai>=1.60
 
 # --- configuration ---
 python-dotenv>=1.0

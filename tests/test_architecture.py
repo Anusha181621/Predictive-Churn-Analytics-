@@ -201,12 +201,12 @@ def test_the_pipeline_never_reaches_the_network() -> None:
 def test_only_the_assistant_imports_the_ai_client() -> None:
     """One module owns the dependency, so turning the feature off is a one-file question."""
     importers = {
-        Path(path).parts[-3:] for path, modules in _all_imports().items() if "anthropic" in modules
+        Path(path).parts[-3:] for path, modules in _all_imports().items() if "openai" in modules
     }
-    assert importers, "nothing imports anthropic; the allow-list has gone stale"
+    assert importers, "nothing imports openai; the allow-list has gone stale"
 
     offenders = sorted("/".join(parts) for parts in importers - _NETWORK_ALLOWED)
-    assert not offenders, f"anthropic is imported outside the assistant: {offenders}"
+    assert not offenders, f"openai is imported outside the assistant: {offenders}"
 
 
 def test_the_assistant_is_optional() -> None:
@@ -214,7 +214,7 @@ def test_the_assistant_is_optional() -> None:
     from app.assistant import agent
 
     settings = get_settings()
-    assert settings.anthropic_api_key is None or isinstance(settings.anthropic_api_key, str)
+    assert settings.openai_api_key is None or isinstance(settings.openai_api_key, str)
     # No validation rule may reject an absent key: unconfigured is a supported state.
     assert agent.NOT_CONFIGURED
     assert "assistant" in agent.NOT_CONFIGURED.lower()
