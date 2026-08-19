@@ -14,7 +14,6 @@ from __future__ import annotations
 import streamlit as st
 
 from app.assistant.agent import (
-    EXAMPLE_QUESTIONS,
     NOT_CONFIGURED,
     AssistantReply,
     ToolCall,
@@ -27,8 +26,8 @@ from app.data_access import load_customer_master, prediction_date, require
 #: Chat history in the shape the API expects, so it can be replayed without translation.
 _HISTORY_KEY = "assistant_history"
 
-#: Set by an example button, consumed on the next run. Streamlit reruns top to bottom, so a button
-#: pressed below the chat input cannot feed it directly -- it parks the question here instead.
+#: Set by the question box, consumed on the next run. Streamlit reruns top to bottom, so a box
+#: rendered below the thread cannot append to it in the same pass -- it parks the question here.
 _PENDING_KEY = "assistant_pending"
 
 #: How each tool describes itself while it runs.
@@ -65,31 +64,86 @@ def render() -> None:
 
     history: list[dict[str, str]] = st.session_state.setdefault(_HISTORY_KEY, [])
 
-    if not history:
-        _examples()
+    _new_chat_button(history)
+
+    question = st.session_state.pop(_PENDING_KEY, None)
 
     for turn in history:
         with st.chat_message(turn["role"]):
             st.markdown(turn["content"])
 
-    question = st.chat_input("Ask about churn, revenue at risk, segments or the model")
-    pending = st.session_state.pop(_PENDING_KEY, None)
-    question = question or pending
-    if not question:
-        return
+    if question:
+        with st.chat_message("user"):
+            st.markdown(question)
 
-    with st.chat_message("user"):
-        st.markdown(question)
+        with st.chat_message("assistant"):
+            reply = _answer(question, history)
+            st.markdown(reply.text)
 
-    with st.chat_message("assistant"):
-        reply = _answer(question, history)
-        st.markdown(reply.text)
+        # The tool traffic is deliberately not replayed into the history: each turn re-queries
+        # what it needs, so a figure quoted before the artefacts were regenerated can never be
+        # reused after.
+        history.append({"role": "user", "content": question})
+        history.append({"role": "assistant", "content": reply.text})
+        st.session_state[_HISTORY_KEY] = history
 
-    # The tool traffic is deliberately not replayed into the history: each turn re-queries what it
-    # needs, so a figure quoted before the artefacts were regenerated can never be reused after.
-    history.append({"role": "user", "content": question})
-    history.append({"role": "assistant", "content": reply.text})
-    st.session_state[_HISTORY_KEY] = history
+    # The question box sits below the thread, so it stays where the reader last looked.
+    _ask_your_own(bool(history))
+
+
+def _new_chat_button(history: list[dict[str, str]]) -> None:
+    """Drop the current conversation and start again from an empty page.
+
+    Every turn is answered with fresh queries, so nothing is lost but the thread itself. It is
+    offered even on an empty page, greyed out, so its position does not move once a chat begins.
+    """
+    _, right = st.columns([4, 1])
+    with right:
+        if st.button(
+            "Start new chat",
+            key="assistant_new_chat",
+            width="stretch",
+            disabled=not history,
+            help="Clear this conversation and begin a new one",
+        ):
+            st.session_state[_HISTORY_KEY] = []
+            st.session_state.pop(_PENDING_KEY, None)
+            st.rerun()
+
+
+def _ask_your_own(started: bool) -> None:
+    """The only way in: a box with room to write a question of your own.
+
+    A one-line chat bar suits a follow-up but not the first question, where a reader usually wants
+    to say which segment, which period and what they mean by risk. This gives them the space for
+    both, and the same box carries the follow-ups once the thread has started.
+    """
+    if started:
+        section("Ask another question")
+    else:
+        section(
+            "Ask your own question",
+            "Write it in your own words — the assistant answers from the customer book, the "
+            "churn predictions, the segments, the recommended actions and the model's own "
+            "accuracy.",
+        )
+    with st.form("assistant_custom_question", clear_on_submit=True, border=False):
+        text = st.text_area(
+            "Your question",
+            key="assistant_custom_text",
+            height=110,
+            placeholder=(
+                "For example: which of our high-value customers are most likely to churn this "
+                "quarter, and what should we do about them?"
+            ),
+            label_visibility="collapsed",
+        )
+        asked = st.form_submit_button("Ask", type="primary")
+
+    # Outside the form block: a rerun raised inside it would abandon the form mid-render.
+    if asked and text.strip():
+        st.session_state[_PENDING_KEY] = text.strip()
+        st.rerun()
 
 
 def _answer(question: str, history: list[dict[str, str]]) -> AssistantReply:
@@ -114,17 +168,6 @@ def _answer(question: str, history: list[dict[str, str]]) -> AssistantReply:
     return reply
 
 
-def _examples() -> None:
-    """Three starting questions, chosen to show the range rather than to look impressive."""
-    section("Try one of these")
-    columns = st.columns(len(EXAMPLE_QUESTIONS), gap="medium")
-    for index, (column, example) in enumerate(zip(columns, EXAMPLE_QUESTIONS)):
-        with column:
-            if st.button(example, key=f"assistant_example_{index}", width="stretch"):
-                st.session_state[_PENDING_KEY] = example
-                st.rerun()
-
-
 def _unconfigured() -> None:
     """What the page shows when no assistant key has been set up.
 
@@ -135,14 +178,11 @@ def _unconfigured() -> None:
 
     section("What this page does when it is switched on")
     st.markdown(
-        "It answers questions about the customer base in plain language, by querying the same "
-        "figures the other pages show — the customer book, the churn predictions, the segments, "
-        "the recommended actions and the model's own accuracy. It cannot change any of them, and "
-        "every figure in an answer comes from a query you can see it make."
+        "It answers questions of your own about the customer base in plain language, by querying "
+        "the same figures the other pages show — the customer book, the churn predictions, the "
+        "segments, the recommended actions and the model's own accuracy. It cannot change any of "
+        "them, and every figure in an answer comes from a query you can see it make."
     )
-    st.markdown("**Questions it is built to answer:**")
-    for example in EXAMPLE_QUESTIONS:
-        st.markdown(f"- {example}")
     st.markdown(
         "Questions the data cannot support — marketing spend, campaign history, web analytics, "
         "anything about the future beyond the modelled horizon — are declined rather than "
